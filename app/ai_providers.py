@@ -93,29 +93,49 @@ async def _pollinations_text(system: str, user: str) -> str | None:
 
 
 async def chat_text(system: str, user: str) -> tuple[str | None, str]:
-    """Return (text, provider). Provider is 'local' when nothing is configured."""
+    """Return (text, provider). All configured providers race; first success wins.
+
+    Provider is 'local' when nothing is configured or all fail.
+    """
     s = _settings()
     order = [p.strip() for p in s.AI_TEXT_PROVIDER.split(",") if p.strip()] or ["auto"]
     if order == ["auto"]:
         order = ["gemini", "openrouter", "groq", "pollinations"]
-    for name in order:
-        if name == "off":
-            return None, "local"
+    order = [p for p in order if p != "off"]
+    if not order:
+        return None, "local"
+
+    async def one(name: str) -> str | None:
         if name == "gemini":
-            out = await _gemini_text(system, user)
-        elif name == "openrouter":
-            out = await _openai_compat_text("https://openrouter.ai/api/v1", s.OPENROUTER_API_KEY,
-                                            s.OPENROUTER_MODEL, system, user)
-        elif name == "groq":
-            out = await _openai_compat_text("https://api.groq.com/openai/v1", s.GROQ_API_KEY,
-                                            s.GROQ_MODEL, system, user)
-        elif name == "pollinations":
-            out = await _pollinations_text(system, user)
-        else:
-            continue
-        if out:
-            return out, name
-    return None, "local"
+            return await _gemini_text(system, user)
+        if name == "openrouter":
+            return await _openai_compat_text("https://openrouter.ai/api/v1", s.OPENROUTER_API_KEY,
+                                             s.OPENROUTER_MODEL, system, user)
+        if name == "groq":
+            return await _openai_compat_text("https://api.groq.com/openai/v1", s.GROQ_API_KEY,
+                                             s.GROQ_MODEL, system, user)
+        if name == "pollinations":
+            return await _pollinations_text(system, user)
+        return None
+
+    tasks = {asyncio.create_task(one(n)): n for n in order}
+    try:
+        while tasks:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            for t in done:
+                name = tasks.pop(t)
+                try:
+                    out = t.result()
+                except Exception:
+                    continue
+                if out:
+                    for p in tasks:
+                        p.cancel()
+                    return out, name
+        return None, "local"
+    finally:
+        for t in tasks:
+            t.cancel()
 
 
 async def compare_photos(before: bytes, after: bytes, context: str) -> tuple[str | None, str]:
