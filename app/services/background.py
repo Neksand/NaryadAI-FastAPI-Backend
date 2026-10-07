@@ -4,9 +4,6 @@ import json
 
 import redis.asyncio as aioredis
 
-TELEGRAM_EVENTS = {"order.created", "order.overdue", "order.overdue_warning",
-                   "order.escalated", "order.escalated_not_accepted", "order.ai_review_ready", "order.closed"}
-
 ACTION_NOTIFY = {
     "accept": "WORK_ORDER_ACCEPTED", "reject": "WORK_ORDER_REJECTED",
     "start": "WORK_ORDER_STARTED", "pause": "WORK_ORDER_PAUSED",
@@ -26,11 +23,11 @@ ACTION_WS = {
 
 
 async def _notify_for_event(conn, event: str, payload: dict, channels: list[str]):
-    """Central fan-out: persistent notification + typed WS event + optional Telegram.
+    """Central fan-out: persistent notification + typed WS event.
 
-    Returns (ws_type, notified_rows). Telegram failure never raises.
+    Returns (ws_type, notified_rows).
     """
-    from app.notifications import notify, push_optional
+    from app.notifications import notify
     from app.routers.realtime import broadcast
 
     oid = payload.get("id") or payload.get("work_order_id")
@@ -84,10 +81,6 @@ async def _notify_for_event(conn, event: str, payload: dict, channels: list[str]
             await broadcast(channels, "NOTIFICATION_CREATED",
                             {"notifications": rows, "related_entity_type": "work_order",
                              "related_entity_id": str(oid) if oid else None})
-    except Exception:
-        pass
-    try:
-        await push_optional(rows)
     except Exception:
         pass
     return ws_type, rows

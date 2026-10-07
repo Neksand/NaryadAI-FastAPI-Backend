@@ -1,11 +1,7 @@
-"""Central NotificationService (spec §20).
+"""Central NotificationService.
 
 BUSINESS EVENT -> NotificationService.notify() -> persistent DB row
-  -> WebSocket (core) -> optional Telegram (adapter, failure-safe).
-
-Business services NEVER call Telegram directly. A Telegram outage must not
-roll back work-order transitions: notify() catches channel errors per
-recipient and always commits the DB row first.
+  -> WebSocket to the app. No external push services involved.
 """
 
 import json
@@ -77,21 +73,3 @@ async def notify(conn, recipient_ids: list[str], type_: str, data: dict,
         rows.append({"id": str(row["id"]), "recipient_id": str(row["recipient_id"]), "type": row["type"],
                      "title": row["title"], "message": row["message"], "lang": row["lang"]})
     return rows
-
-
-async def push_optional(rows: list[dict]) -> None:
-    """Best-effort Telegram adapter. Never raises; never blocks the caller long."""
-    from app.config import settings
-
-    if not settings.TELEGRAM_BOT_TOKEN or not rows:
-        return
-    try:
-        from app.notify import send_telegram
-
-        for r in rows:
-            try:
-                await send_telegram(f"<b>{r['title']}</b>\n{r['message']}")
-            except Exception as e:  # noqa: BLE001 - per-recipient isolation
-                log.warning("telegram fan-out failed: %s", e)
-    except Exception as e:  # noqa: BLE001
-        log.warning("telegram adapter failed: %s", e)

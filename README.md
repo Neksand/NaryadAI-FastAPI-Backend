@@ -37,10 +37,10 @@ uvicorn app.main:app --reload
 |---|---|---|
 | `AI_MODE` | `mock` (офлайн-демо) / `external` | Выбор движка ИИ |
 | `GEMINI_API_KEY` | https://aistudio.google.com — бесплатная квота, текст+зрение | Сравнение фото «до/после» (оценка 1–5), проверка соответствия работ проблеме |
-| `TELEGRAM_ENABLED` | `false` (адаптер выключен) / `true` + `TELEGRAM_BOT_TOKEN` (@BotFather) | Push-уведомления — опциональный канал; ядро работает без него |
 | `OPENROUTER_API_KEY` | https://openrouter.ai — бесплатные `:free` модели | Текстовая проверка вместо локальной эвристики |
 | `GROQ_API_KEY` | https://console.groq.com — бесплатный тир | Текст + транскрибация голосовых заметок (`POST /ai/transcribe`) |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_DEFAULT_CHAT_ID` | @BotFather | Push-уведомления: новые наряды, просрочки, эскалации, вердикты ИИ |
+
+Уведомления — только в приложении: персистентные записи в БД + WebSocket. Внешних push-сервисов нет.
 
 `AI_TEXT_PROVIDER` / `AI_VISION_PROVIDER`: `auto` (по порядку) или конкретный провайдер, `off` — только локальный движок. Наружу уходят только обезличенные тексты и фото — без имён, ПИНов и токенов.
 
@@ -51,7 +51,7 @@ uvicorn app.main:app --reload
 - Auth: `POST /auth/login|refresh|logout` (`token_type: bearer`, `user.language`), `GET /me`, `GET /auth/me`, `PATCH /users/me/preferences` (`{language: ru|kk}`), `POST /devices` (android/ios/web/desktop/tauri)
 - Наряды: CRUD + `POST /work-orders/:id/{assign,accept,reject,start,pause,resume,complete,close,rework}` и общий `/transitions`, `GET /work-orders/my|my/active|my/history`, события, ai-review, отчёты, материалы, `GET /shift/board|summary`, история оборудования
 - Каталоги: `/sites`, `/teams`, `/equipment`, `/materials`, `/fault-codes` (чтение); мутации — `/dict/:type` (admin)
-- Уведомления: `GET /notifications`, `POST /notifications/:id/read|read-all` (in-app + WebSocket ядро, Telegram — опционально)
+- Уведомления: `GET /notifications`, `POST /notifications/:id/read|read-all` (in-app + WebSocket, без внешних сервисов)
 - Аналитика: `/analytics/{overview,work-orders,workers,equipment,downtime,ai-insights,...}`
 - ИИ (`AI_MODE=mock` по умолчанию, без ключей и интернета): `POST /ai/work-orders/:id/{recommend-worker,inspect}`, `GET .../inspection`, `/ai/insights`, `suggest-assignee|fault-code`, `transcribe`
 - Отчёты: `POST /reports/export` → `202 {job_id}` → `GET /reports/export/:job_id` (PDF/XLSX)
@@ -92,7 +92,7 @@ app/routers/           auth, users (workers/preferences), catalog (sites/teams/.
 app/services/          ai_review (rules-v1), insights (детектор аномалий),
                        reports (XLSX/PDF), background (outbox+уведомления+WS, дедлайны, инсайты)
 app/ai/                gateway + mock (ru/kk) + vision/inspection/recommendation/anomaly/reports
-app/notifications.py   NotificationService (ru/kk шаблоны, персистентность, Telegram-адаптер)
+app/notifications.py   NotificationService (ru/kk шаблоны, персистентность)
 app/ai_providers.py    внешние ИИ (все опциональны, fallback — локально)
 migrations/            схема PostgreSQL (outbox, idempotency, notifications, ai_jobs, immutable-журналы)
 scripts/               migrate, seed (4 участка / 25 единиц / 19 сотрудников / 20 шифров / 40 материалов / 500 нарядов + 5 паттернов), create_admin

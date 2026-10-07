@@ -29,17 +29,14 @@ class Settings(BaseSettings):
     AI_TEXT_PROVIDER: str = "auto"
     AI_VISION_PROVIDER: str = "auto"
     GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.0-flash"
+    GEMINI_MODEL: str = "gemini-2.5-flash"
     OPENROUTER_API_KEY: str = ""
-    OPENROUTER_MODEL: str = "qwen/qwen3-8b:free"
+    OPENROUTER_MODEL: str = "google/gemma-4-31b-it:free"
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_WHISPER_MODEL: str = "whisper-large-v3-turbo"
-    # --- Push ---
-    TELEGRAM_ENABLED: str = "false"
+    # --- Push: notifications are in-app (DB) + WebSocket. No external push. ---
     PUSH_ENABLED: str = "false"
-    TELEGRAM_BOT_TOKEN: str = ""
-    TELEGRAM_DEFAULT_CHAT_ID: str = ""
     # --- Storage ---
     STORAGE_TYPE: str = "s3"
     STORAGE_PATH: str = "./storage"

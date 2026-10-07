@@ -91,42 +91,34 @@ def test_transition_validation_and_actions():
         assert len([e for e in ev if e["action"] in ("accept", "start", "pause", "resume")]) == 4
 
 
-def test_notifications_persisted_and_telegram_safe():
+def test_notifications_persisted_in_app():
     with _client() as c:
         m = _login(c, "master1", "3333")
         mh = {"Authorization": f"Bearer {m['access_token']}"}
-        # bogus telegram token must not break anything (optional adapter)
-        import app.config as cfg
-        cfg.settings.TELEGRAM_BOT_TOKEN = "bogus"
-        cfg.settings.TELEGRAM_ENABLED = "true"
-        try:
-            w = _login(c, "worker04", "1004")
-            wh = {"Authorization": f"Bearer {w['access_token']}"}
-            me = c.get("/api/v1/me", headers=wh).json()
-            eq = [e for e in c.get("/api/v1/dict/equipment", headers=mh).json()["items"]
-                  if e["area_id"] in me["area_ids"]][0]
-            from datetime import datetime, timedelta, timezone
-            due = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
-            r = c.post("/api/v1/work-orders", headers={**mh, "Idempotency-Key": str(uuid.uuid4())},
-                       json={"kind": "planned", "description": "Уведомления и телеграм",
-                             "equipment_id": eq["id"], "assignee_id": w["user"]["id"],
-                             "priority": "normal", "due_at": due})
-            assert r.status_code == 201, r.text
-            import time
-            notes = []
-            for _ in range(20):
-                time.sleep(1)
-                notes = c.get("/api/v1/notifications?unread_only=true", headers=wh).json()["data"]
-                if notes:
-                    break
-            assert notes, "no persistent notification for assignee"
-            assert notes[0]["type"] == "WORK_ORDER_ASSIGNED"
-            assert "наряд" in notes[0]["message"].lower() or "наряд" in notes[0]["title"].lower()
-            nid = notes[0]["id"]
-            assert c.post(f"/api/v1/notifications/{nid}/read", headers=wh).status_code == 200
-        finally:
-            cfg.settings.TELEGRAM_BOT_TOKEN = ""
-            cfg.settings.TELEGRAM_ENABLED = "false"
+        w = _login(c, "worker04", "1004")
+        wh = {"Authorization": f"Bearer {w['access_token']}"}
+        me = c.get("/api/v1/me", headers=wh).json()
+        eq = [e for e in c.get("/api/v1/dict/equipment", headers=mh).json()["items"]
+              if e["area_id"] in me["area_ids"]][0]
+        from datetime import datetime, timedelta, timezone
+        due = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+        r = c.post("/api/v1/work-orders", headers={**mh, "Idempotency-Key": str(uuid.uuid4())},
+                   json={"kind": "planned", "description": "Уведомления в приложении",
+                         "equipment_id": eq["id"], "assignee_id": w["user"]["id"],
+                         "priority": "normal", "due_at": due})
+        assert r.status_code == 201, r.text
+        import time
+        notes = []
+        for _ in range(20):
+            time.sleep(1)
+            notes = c.get("/api/v1/notifications?unread_only=true", headers=wh).json()["data"]
+            if notes:
+                break
+        assert notes, "no persistent notification for assignee"
+        assert notes[0]["type"] == "WORK_ORDER_ASSIGNED"
+        assert "наряд" in notes[0]["message"].lower() or "наряд" in notes[0]["title"].lower()
+        nid = notes[0]["id"]
+        assert c.post(f"/api/v1/notifications/{nid}/read", headers=wh).status_code == 200
 
 
 def test_mock_ai_localized():
