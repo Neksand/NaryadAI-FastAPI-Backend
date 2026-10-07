@@ -1,7 +1,7 @@
 import re
 import uuid
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, File, Form, UploadFile
 from pydantic import BaseModel
 
 from app.db import get_pool
@@ -19,6 +19,32 @@ class AssigneeIn(BaseModel):
 class FaultIn(BaseModel):
     description: str
     equipment_id: uuid.UUID | None = None
+
+
+@router.post("/ai/transcribe")
+async def transcribe(
+    file: UploadFile = File(...),
+    work_order_id: uuid.UUID | None = Form(default=None),
+    user: dict = Depends(get_current_user),
+):
+    """Voice note upload + transcription (Groq Whisper when GROQ_API_KEY is set)."""
+    require_role(user, "worker", "master")
+    from app.ai_providers import transcribe_audio
+
+    data = await file.read()
+    if not data or len(data) > 25 * 1024 * 1024:
+        from app.errors import validation_error
+        raise validation_error([{"path": "file", "message": "Аудио до 25 МБ"}])
+    text, provider = await transcribe_audio(data, file.filename or "voice.ogg")
+    pool = await get_pool()
+    key = f"voice-notes/{work_order_id or 'pending'}/{uuid.uuid4()}"
+    from app.storage import put_bytes
+    put_bytes(key, data, file.content_type or "audio/ogg")
+    row = await pool.fetchrow(
+        "INSERT INTO voice_notes(work_order_id, object_key, transcript, provider, author_id) VALUES ($1::uuid,$2,$3,$4,$5::uuid) RETURNING id",
+        str(work_order_id) if work_order_id else None, key, text, provider, user["id"])
+    return {"id": str(row["id"]), "transcript": text, "provider": provider,
+            "pending": text is None}
 
 
 @router.post("/ai/suggest-assignee")

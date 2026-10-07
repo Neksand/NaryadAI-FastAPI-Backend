@@ -23,7 +23,7 @@ async def dashboard(from_: str | None = None, to: str | None = None, user: dict 
     pool = await get_pool()
     extra, params = "", []
     if user["role"] == "master":
-        extra = "AND w.area_id = ANY($1::uuid[])"
+        extra = "AND w.area_id = ANY($3::uuid[])"
         params.append(user["areaIds"])
     row = await pool.fetchrow(
         f"""SELECT count(*)::int AS total,
@@ -157,6 +157,17 @@ async def plan_order(iid: uuid.UUID, body: PlanOrder, request: Request, user: di
 
     res = await run_idempotent(key, user["id"], h, action2)
     return {**res["body"], "replayed": res["replayed"]}
+
+
+@router.post("/analytics/insights/generate")
+async def generate(user: dict = Depends(get_current_user)):
+    require_role(user, "admin", "manager", "master")
+    pool = await get_pool()
+    from app.services.insights import generate_insights
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            created = await generate_insights(conn)
+    return {"generated": len(created), "headlines": created}
 
 
 @router.get("/analytics/ratings")

@@ -14,6 +14,42 @@ router = APIRouter()
 ACCEPTED = {"image/jpeg", "image/png", "image/webp"}
 
 
+def _dhash(data: bytes) -> str | None:
+    """64-bit difference hash (Pillow only, no extra deps)."""
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(data)).convert("L").resize((9, 8))
+        px = list(img.tobytes())
+        bits = "".join("1" if px[r * 9 + c] > px[r * 9 + c + 1] else "0" for r in range(8) for c in range(8))
+        return hex(int(bits, 2))[2:].zfill(16)
+    except Exception:
+        return None
+
+
+def hamming(a: str, b: str) -> int:
+    try:
+        return bin(int(a, 16) ^ int(b, 16)).count("1")
+    except ValueError:
+        return 64
+
+
+def _exif_taken_at(data: bytes):
+    """EXIF DateTimeOriginal for 'photo taken at closing time' checks."""
+    try:
+        import io
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        exif = img.getexif()
+        raw = exif.get(36867) or exif.get(306)
+        if not raw:
+            return None
+        from datetime import datetime
+        return datetime.strptime(str(raw), "%Y:%m:%d %H:%M:%S")
+    except Exception:
+        return None
+
+
 def _verify(data: bytes, mime: str):
     if mime not in ACCEPTED:
         raise validation_error([{"path": "file", "message": "Поддерживаются JPEG, PNG и WebP"}])
@@ -42,11 +78,21 @@ async def _create_photo(user: dict, data: bytes, mime: str, kind: str, order_id:
             if str(order.get("assignee_id") or "") != user["id"] and not (user["crewId"] and str(order.get("crew_id") or "") == user["crewId"]):
                 raise forbidden()
     digest = hashlib.sha256(data).hexdigest()
+    phash = _dhash(data)
+    taken_at = _exif_taken_at(data)
     dup = await pool.fetchrow(
         "SELECT id, object_key FROM photos WHERE author_id=$1::uuid AND sha256=$2 AND kind=$3 AND work_order_id IS NULL LIMIT 1",
         user["id"], digest, kind)
     if dup:
         return {"id": str(dup["id"]), "url": signed_url(dup["object_key"], 300), "expires_in": 300, "replayed": True}
+    if phash and not order_id:
+        # near-duplicate of an old photo (re-shot at a different angle): warn, still accept
+        near = await pool.fetchrow(
+            "SELECT id, phash FROM photos WHERE author_id=$1::uuid AND kind=$2 AND phash IS NOT NULL LIMIT 50",
+            user["id"], kind)
+        _near_dup = bool(near and near["phash"] and hamming(phash, near["phash"]) <= 6)
+    else:
+        _near_dup = False
     if order_id:
         cnt = await pool.fetchval("SELECT count(*) FROM photos WHERE work_order_id=$1::uuid AND kind=$2", order_id, kind)
         if (kind == "before" and int(cnt) >= 5) or (kind == "after" and int(cnt) >= 10):
@@ -55,8 +101,8 @@ async def _create_photo(user: dict, data: bytes, mime: str, kind: str, order_id:
     put_bytes(key, data, mime)
     try:
         row = await pool.fetchrow(
-            "INSERT INTO photos(work_order_id, kind, object_key, content_type, size_bytes, sha256, author_id) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::uuid) RETURNING id",
-            order_id, kind, key, mime, len(data), digest, user["id"])
+            "INSERT INTO photos(work_order_id, kind, object_key, content_type, size_bytes, sha256, author_id, phash, exif_taken_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8,$9) RETURNING id",
+            order_id, kind, key, mime, len(data), digest, user["id"], phash, taken_at)
     except Exception:
         from app.storage import get_s3
         from app.config import settings as s

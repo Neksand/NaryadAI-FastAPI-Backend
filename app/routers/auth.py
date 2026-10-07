@@ -26,7 +26,7 @@ class LogoutIn(BaseModel):
 
 
 class DeviceIn(BaseModel):
-    platform: str = Field(pattern="^(android|ios|web)$")
+    platform: str = Field(pattern="^(android|ios|web|desktop|tauri)$")
     fcm_token: str = Field(min_length=1, max_length=500)
 
 
@@ -58,7 +58,7 @@ async def _issue_session(user: dict) -> dict:
     refresh = create_refresh_token()
     sess = await pool.fetchrow(
         "INSERT INTO refresh_sessions(employee_id, token_hash, expires_at) VALUES ($1,$2, now() + ($3::text || ' days')::interval) RETURNING id",
-        user["id"], hash_refresh_token(refresh), settings.REFRESH_TOKEN_TTL_DAYS,
+        user["id"], hash_refresh_token(refresh), str(settings.REFRESH_TOKEN_TTL_DAYS),
     )
     access = create_access_token(user, str(sess["id"]))
     return {"access_token": access, "refresh_token": refresh,
@@ -112,7 +112,7 @@ async def refresh(body: RefreshIn):
             await conn.execute("UPDATE refresh_sessions SET revoked_at=now(), last_used_at=now() WHERE id=$1", cur["id"])
             await conn.execute(
                 "INSERT INTO refresh_sessions(employee_id, token_hash, expires_at) VALUES ($1,$2, now() + ($3::text || ' days')::interval)",
-                cur["employee_id"], hash_refresh_token(replacement), settings.REFRESH_TOKEN_TTL_DAYS)
+                cur["employee_id"], hash_refresh_token(replacement), str(settings.REFRESH_TOKEN_TTL_DAYS))
             user = {"id": str(emp["id"]), "role": emp["role"],
                     "areaIds": [str(a) for a in (emp["area_ids"] or [])],
                     "crewId": str(emp["crew_id"]) if emp["crew_id"] else None,

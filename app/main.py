@@ -18,10 +18,10 @@ from app.storage import ensure_upload_bucket
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    from app.services.background import deadline_loop, outbox_loop
+    from app.services.background import deadline_loop, insights_loop, outbox_loop
 
     ensure_upload_bucket()
-    tasks = [asyncio.create_task(outbox_loop()), asyncio.create_task(deadline_loop())]
+    tasks = [asyncio.create_task(outbox_loop()), asyncio.create_task(deadline_loop()), asyncio.create_task(insights_loop())]
     yield
     for t in tasks:
         t.cancel()

@@ -1,8 +1,11 @@
-"""Фоновые задачи: outbox publisher (500мс), deadline monitor (30с). Порт event-bus.ts + deadlines.ts."""
+"""Фоновые задачи: outbox publisher (500мс), deadline monitor (30с), insights (6ч)."""
 import asyncio
 import json
 
 import redis.asyncio as aioredis
+
+TELEGRAM_EVENTS = {"order.created", "order.overdue", "order.overdue_warning",
+                   "order.escalated", "order.escalated_not_accepted", "order.ai_review_ready", "order.closed"}
 
 
 async def outbox_loop() -> None:
@@ -39,6 +42,13 @@ async def outbox_loop() -> None:
                             channels = list(row["channels"] or [])
                             await redis.publish("naryadai:events:v1", json.dumps(
                                 {"event": event, "channels": channels, "payload": row["payload"], "seq": seq}, default=str))
+                            if event in TELEGRAM_EVENTS:
+                                try:
+                                    from app.notify import send_telegram
+                                    p = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"] or "{}")
+                                    await send_telegram(f"НарядAI · {event}: {json.dumps(p, default=str)[:400]}")
+                                except Exception:
+                                    pass
                         await conn.execute("UPDATE outbox_events SET published_at=now(), locked_until=NULL WHERE id=$1", row["id"])
                     except Exception as e:  # noqa: BLE001
                         await conn.execute("UPDATE outbox_events SET locked_until=NULL, last_error=$2 WHERE id=$1",
@@ -46,6 +56,26 @@ async def outbox_loop() -> None:
                         await asyncio.sleep(0.2)
         except Exception:
             await asyncio.sleep(1.0)
+
+
+async def insights_loop() -> None:
+    """Regenerate rule-based insights every 6 hours."""
+    await asyncio.sleep(60)
+    while True:
+        try:
+            from app.db import get_pool
+            from app.services.insights import generate_insights
+
+            pool = await get_pool()
+            async with pool.acquire() as conn:
+                async with conn.transaction():
+                    created = await generate_insights(conn)
+                    if created:
+                        import logging
+                        logging.getLogger("insights").info("generated %d insights", len(created))
+        except Exception:
+            pass
+        await asyncio.sleep(6 * 3600)
 
 
 async def deadline_loop() -> None:
