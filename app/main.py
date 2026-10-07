@@ -54,6 +54,11 @@ def create_app() -> FastAPI:
                 "request_id": request.headers.get("x-request-id", str(uuid.uuid4()))}
         return JSONResponse(status_code=422, content=body)
 
+    @app.get("/")
+    async def root():
+        return {"service": "naryadai-api", "docs": "/docs", "openapi": "/openapi.json",
+                "health": "/health/live", "ready": "/health/ready"}
+
     @app.get("/health/live")
     async def live():
         return {"status": "ok"}
