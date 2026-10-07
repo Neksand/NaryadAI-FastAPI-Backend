@@ -17,6 +17,38 @@ def _scope(user: dict, alias: str = "w") -> tuple[str, list]:
     return ("", [])
 
 
+@router.get("/analytics/overview", summary="Manager overview (alias of dashboard)")
+async def overview(from_: str | None = None, to: str | None = None, user: dict = Depends(get_current_user)):
+    return await dashboard(from_, to, user)
+
+
+@router.get("/analytics/work-orders", summary="Work-order statistics by status")
+async def wo_stats(from_: str | None = None, to: str | None = None, user: dict = Depends(get_current_user)):
+    require_role(user, "master", "manager", "admin")
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT status, count(*)::int AS n FROM work_orders w
+           WHERE ($1::timestamptz IS NULL OR w.issued_at >= $1::timestamptz)
+           AND ($2::timestamptz IS NULL OR w.issued_at < $2::timestamptz)
+           GROUP BY status ORDER BY n DESC""", from_, to)
+    return {"data": [dict(r) for r in rows]}
+
+
+@router.get("/analytics/workers", summary="Worker performance (alias of ratings)")
+async def workers_stats(user: dict = Depends(get_current_user)):
+    return await ratings("employee", user)
+
+
+@router.get("/analytics/equipment", summary="Equipment analytics (alias of ranking)")
+async def equipment_stats(user: dict = Depends(get_current_user)):
+    return await ranking(user)
+
+
+@router.get("/analytics/ai-insights", summary="AI insights (alias)")
+async def ai_insights(status: str | None = None, user: dict = Depends(get_current_user)):
+    return await insights(status, user)
+
+
 @router.get("/analytics/dashboard")
 async def dashboard(from_: str | None = None, to: str | None = None, user: dict = Depends(get_current_user)):
     require_role(user, "master", "manager", "admin")
@@ -102,7 +134,7 @@ async def materials(user: dict = Depends(get_current_user)):
 async def insights(status: str | None = None, user: dict = Depends(get_current_user)):
     require_role(user, "master", "manager", "admin")
     pool = await get_pool()
-    rows = await pool.fetch("SELECT * FROM insights WHERE ($1::text IS NULL OR status=$1) ORDER BY created_at DESC LIMIT 100", status)
+    rows = await pool.fetch("SELECT * FROM insights WHERE ($1::text IS NULL OR status=$1::insight_status) ORDER BY created_at DESC LIMIT 100", status)
     out = []
     for r in rows:
         d = dict(r)
@@ -132,7 +164,7 @@ async def plan_order(iid: uuid.UUID, body: PlanOrder, request: Request, user: di
     require_role(user, "master", "manager", "admin")
     if int(bool(body.assignee_id)) + int(bool(body.crew_id)) != 1:
         raise validation_error([{"path": "assignee_id", "message": "Укажите исполнителя или бригаду"}])
-    key = request.headers.get("idempotency-key")
+    key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
     h = sha256_hex(json.dumps({"iid": str(iid), **body.model_dump(mode="json")}, sort_keys=True, default=str))
 
     async def action2(conn):

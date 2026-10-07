@@ -61,8 +61,10 @@ async def _issue_session(user: dict) -> dict:
         user["id"], hash_refresh_token(refresh), str(settings.REFRESH_TOKEN_TTL_DAYS),
     )
     access = create_access_token(user, str(sess["id"]))
-    return {"access_token": access, "refresh_token": refresh,
-            "expires_in": settings.ACCESS_TOKEN_TTL_SECONDS, "user": _public(user)}
+    pub = _public(user)
+    pub["language"] = user.get("lang", "ru")
+    return {"access_token": access, "token_type": "bearer", "refresh_token": refresh,
+            "expires_in": settings.ACCESS_TOKEN_TTL_SECONDS, "user": pub}
 
 
 @router.post("/auth/login")
@@ -137,13 +139,20 @@ async def logout(body: LogoutIn, user: dict = Depends(get_current_user)):
     return None
 
 
-@router.get("/me")
+@router.get("/me", summary="Current user profile")
 async def me(user: dict = Depends(get_current_user)):
     pool = await get_pool()
     extra = await pool.fetchrow(
         "SELECT e.specialty, e.grade, e.shift, e.current_status, e.lang, c.name AS crew_name FROM employees e LEFT JOIN crews c ON c.id=e.crew_id WHERE e.id=$1",
         user["id"])
-    return {**_public({**user, "login": user.get("login"), "lang": "ru"}), **dict(extra)}
+    out = {**_public({**user, "login": user.get("login"), "lang": "ru"}), **dict(extra)}
+    out["language"] = out.get("lang", "ru")
+    return out
+
+
+@router.get("/auth/me", summary="Current user (contract alias)")
+async def auth_me(user: dict = Depends(get_current_user)):
+    return await me(user)
 
 
 @router.post("/devices", status_code=204)

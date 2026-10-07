@@ -10,6 +10,8 @@ log = logging.getLogger("notify")
 async def send_telegram(text: str, chat_id: str | None = None) -> bool:
     from app.config import settings
 
+    if (settings.TELEGRAM_ENABLED or "").lower() not in ("1", "true", "yes"):
+        return False
     if not settings.TELEGRAM_BOT_TOKEN:
         return False
     chat = chat_id or settings.TELEGRAM_DEFAULT_CHAT_ID

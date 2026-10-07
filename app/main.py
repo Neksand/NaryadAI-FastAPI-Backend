@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from app.config import settings
 from app.db import close_pool, get_pool
 from app.errors import AppError
-from app.routers import admin, ai, auth, photos, realtime, reports, work_orders
+from app.routers import admin, ai, auth, catalog, notifications, photos, realtime, reports, users, work_orders
 from app.storage import ensure_upload_bucket
 
 
@@ -41,7 +41,10 @@ def create_app() -> FastAPI:
 
     @app.exception_handler(AppError)
     async def app_error_handler(request: Request, exc: AppError):
-        body: dict = {"error": {"code": exc.code, "message": exc.message}}
+        key = exc.translation_key
+        if exc.code == "invalid_transition":
+            key = "error.invalid_work_order_state"
+        body: dict = {"error": {"code": exc.code, "message": exc.message, "translation_key": key}}
         if exc.details is not None:
             body["error"]["details"] = exc.details
         body["request_id"] = request.headers.get("x-request-id", str(uuid.uuid4()))
@@ -50,6 +53,7 @@ def create_app() -> FastAPI:
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request: Request, exc: RequestValidationError):
         body = {"error": {"code": "validation_error", "message": "Проверьте входные данные",
+                          "translation_key": "error.validation_error",
                           "details": [{"path": ".".join(map(str, e["loc"])), "message": e["msg"]} for e in exc.errors()]},
                 "request_id": request.headers.get("x-request-id", str(uuid.uuid4()))}
         return JSONResponse(status_code=422, content=body)
@@ -58,6 +62,20 @@ def create_app() -> FastAPI:
     async def root():
         return {"service": "naryadai-api", "docs": "/docs", "openapi": "/openapi.json",
                 "health": "/health/live", "ready": "/health/ready"}
+
+    @app.get("/health", summary="Health (contract)")
+    async def health():
+        from app.config import settings as _s
+        db_ok = True
+        try:
+            pool = await get_pool()
+            await pool.fetchval("SELECT 1")
+        except Exception:
+            db_ok = False
+        ai = "mock" if (_s.AI_MODE or "mock") == "mock" else "configured"
+        if not (_s.GEMINI_API_KEY or _s.OPENROUTER_API_KEY or _s.GROQ_API_KEY):
+            ai = "mock"
+        return {"status": "ok" if db_ok else "degraded", "database": "ok" if db_ok else "down", "ai": ai}
 
     @app.get("/health/live")
     async def live():
@@ -78,6 +96,9 @@ def create_app() -> FastAPI:
             return JSONResponse(status_code=503, content={"status": "not_ready"})
 
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(users.router, prefix="/api/v1")
+    app.include_router(catalog.router, prefix="/api/v1")
+    app.include_router(notifications.router, prefix="/api/v1")
     app.include_router(work_orders.router, prefix="/api/v1")
     app.include_router(photos.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")

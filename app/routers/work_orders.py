@@ -203,7 +203,7 @@ async def create_order(body: CreateWO, request: Request, user: dict = Depends(ge
         raise validation_error([{"path": "due_at", "message": "Срок должен быть в будущем"}])
     if int(bool(body.assignee_id)) + int(bool(body.crew_id)) != 1:
         raise validation_error([{"path": "assignee_id", "message": "Укажите ровно одного исполнителя или одну бригаду"}])
-    key = request.headers.get("idempotency-key")
+    key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
     h = _request_hash("POST", "/work-orders", body.model_dump(mode="json"))
 
     async def action(conn):
@@ -255,6 +255,33 @@ async def create_order(body: CreateWO, request: Request, user: dict = Depends(ge
     return {**res["body"], "replayed": res["replayed"]}
 
 
+@router.get("/work-orders/my", summary="My work orders (worker)")
+async def my_orders(request: Request, limit: int = Query(50, ge=1, le=100), cursor: str | None = None,
+                   user: dict = Depends(get_current_user)):
+    require_role(user, "worker")
+    return await list_orders(request, limit=limit, cursor=cursor, area_id=None, equipment_id=None,
+                             assignee_id=user["id"], crew_id=None, priority=None, status=None,
+                             overdue=None, from_=None, to=None, shift=None, kind=None, user=user)
+
+
+@router.get("/work-orders/my/active", summary="My active work orders (worker)")
+async def my_active(request: Request, user: dict = Depends(get_current_user)):
+    require_role(user, "worker")
+    return await list_orders(request, limit=100, cursor=None, area_id=None, equipment_id=None,
+                             assignee_id=user["id"], crew_id=None, priority=None,
+                             status="issued,queued,accepted,in_progress,paused,rework",
+                             overdue=None, from_=None, to=None, shift=None, kind=None, user=user)
+
+
+@router.get("/work-orders/my/history", summary="My work-order history (worker)")
+async def my_history(request: Request, limit: int = Query(50, ge=1, le=100), user: dict = Depends(get_current_user)):
+    require_role(user, "worker")
+    return await list_orders(request, limit=limit, cursor=None, area_id=None, equipment_id=None,
+                             assignee_id=user["id"], crew_id=None, priority=None,
+                             status="done,ai_review,closed,cancelled,rejected",
+                             overdue=None, from_=None, to=None, shift=None, kind=None, user=user)
+
+
 @router.get("/work-orders/{order_id}")
 async def get_order(order_id: uuid.UUID, user: dict = Depends(get_current_user)):
     await assert_can_read_order(user, str(order_id))
@@ -298,7 +325,7 @@ async def transition(order_id: uuid.UUID, body: TransitionIn, request: Request, 
         raise validation_error([{"path": "decision", "message": "Укажите решение мастера"}])
     if body.action == "complete" and (not body.form or not body.form.work_done_text or not body.form.fault_code_id):
         raise validation_error([{"path": "form", "message": "Опишите работу и выберите шифр"}])
-    key = request.headers.get("idempotency-key")
+    key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
     h = _request_hash("POST", f"/work-orders/{order_id}/transitions", body.model_dump(mode="json"))
 
     async def action(conn):
@@ -442,7 +469,7 @@ async def review_decision(order_id: uuid.UUID, body: ReviewDecision, request: Re
     await assert_can_read_order(user, str(order_id))
     if body.decision == "override" and (body.score is None or not body.comment):
         raise validation_error([{"path": "comment", "message": "Для изменения оценки обязательны балл и комментарий"}])
-    key = request.headers.get("idempotency-key")
+    key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
     h = _request_hash("POST", f"/work-orders/{order_id}/review/decision", body.model_dump(mode="json"))
 
     async def action(conn):
@@ -467,7 +494,7 @@ async def review_decision(order_id: uuid.UUID, body: ReviewDecision, request: Re
 async def add_materials(order_id: uuid.UUID, body: list[MaterialItem], request: Request, user: dict = Depends(get_current_user)):
     require_role(user, "worker")
     await assert_can_read_order(user, str(order_id))
-    key = request.headers.get("idempotency-key")
+    key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
     h = _request_hash("POST", f"/work-orders/{order_id}/materials", [m.model_dump(mode="json") for m in body])
 
     async def action(conn):
@@ -484,6 +511,70 @@ async def add_materials(order_id: uuid.UUID, body: list[MaterialItem], request: 
 
     res = await run_idempotent(key, user["id"], h, action)
     return {**res["body"], "replayed": res["replayed"]}
+
+
+class ActionIn(BaseModel):
+    reason_code: str | None = None
+    comment: str | None = Field(default=None, max_length=4000)
+    assignee_id: uuid.UUID | None = None
+    crew_id: uuid.UUID | None = None
+    priority: Literal["critical", "high", "normal", "planned"] | None = None
+    decision: Literal["agree_ai", "override"] | None = None
+    score: int | None = Field(default=None, ge=0, le=100)
+    client_at: datetime | None = None
+    photo_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
+    form: TransitionForm | None = None
+
+
+async def _act(order_id: uuid.UUID, action: str, body: ActionIn, request: Request, user: dict):
+    return await transition(order_id, TransitionIn(action=action, **body.model_dump()), request, user)
+
+
+@router.post("/work-orders/{order_id}/assign", summary="Assign/reassign (master)")
+async def assign(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    """Master assigns the order (maps to `reassign`). Master decides, never AI."""
+    return await _act(order_id, "reassign", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/accept", summary="Accept order (worker)")
+async def accept(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    return await _act(order_id, "accept", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/reject", summary="Reject order with reason (worker)")
+async def reject(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    return await _act(order_id, "reject", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/start", summary="Start execution (worker)")
+async def start(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    return await _act(order_id, "start", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/pause", summary="Pause with reason (worker)")
+async def pause(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    return await _act(order_id, "pause", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/resume", summary="Resume (worker)")
+async def resume(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    return await _act(order_id, "resume", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/complete", summary="Complete -> AI check (worker)")
+async def complete(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    return await _act(order_id, "complete", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/close", summary="Approve & close (master)")
+async def close(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    """Master approves the AI/master review and closes. Final word is human's."""
+    return await _act(order_id, "close", body, request, user)
+
+
+@router.post("/work-orders/{order_id}/rework", summary="Send back for rework (master)")
+async def rework(order_id: uuid.UUID, body: ActionIn, request: Request, user: dict = Depends(get_current_user)):
+    return await _act(order_id, "return_to_rework", body, request, user)
 
 
 @router.get("/shift/board")

@@ -47,6 +47,71 @@ async def transcribe(
             "pending": text is None}
 
 
+@router.post("/ai/work-orders/{oid}/recommend-worker", summary="Recommend worker for order (master decides)")
+async def recommend_worker(oid: uuid.UUID, user: dict = Depends(get_current_user)):
+    """AI suggestion only — assignment is always done by the master."""
+    require_role(user, "master", "manager", "admin")
+    pool = await get_pool()
+    order = await pool.fetchrow("SELECT area_id, equipment_id FROM work_orders WHERE id=$1::uuid", str(oid))
+    if not order:
+        from app.errors import not_found
+        raise not_found("Наряд не найден")
+    body = AssigneeIn(area_id=order["area_id"], equipment_id=order["equipment_id"])
+    base = await suggest_assignee(body, user)
+    from app.ai.worker_recommendation import recommend as gw_recommend
+    gw = await gw_recommend({"candidates": base["suggestions"]}, user.get("lang", "ru"))
+    return {"data": {**gw, "suggestions": base["suggestions"]}}
+
+
+@router.post("/ai/work-orders/{oid}/inspect", summary="Run AI inspection job for order")
+async def inspect_order(oid: uuid.UUID, user: dict = Depends(get_current_user)):
+    """Creates an ai_jobs row (PENDING->PROCESSING->COMPLETED/FAILED), never blocks the order."""
+    require_role(user, "master", "manager", "admin", "worker")
+    pool = await get_pool()
+    order = await pool.fetchrow("SELECT status FROM work_orders WHERE id=$1::uuid", str(oid))
+    if not order:
+        from app.errors import not_found
+        raise not_found("Наряд не найден")
+    job = await pool.fetchrow(
+        "INSERT INTO ai_jobs(work_order_id, status, provider) VALUES ($1::uuid,'PROCESSING','gateway') RETURNING id",
+        str(oid))
+    try:
+        from app.db import get_pool as _gp
+        p2 = await _gp()
+        async with p2.acquire() as conn:
+            async with conn.transaction():
+                from app.services.ai_review import run_ai_review
+                res = await run_ai_review(conn, str(oid))
+        await pool.execute("UPDATE ai_jobs SET status='COMPLETED', result=$2::jsonb, updated_at=now() WHERE id=$1",
+                           job["id"], __import__("json").dumps(res, default=str))
+        return {"data": {"job_id": str(job["id"]), "status": "COMPLETED", "result": res}}
+    except Exception as e:  # noqa: BLE001 - AI failure never breaks the order
+        await pool.execute("UPDATE ai_jobs SET status='FAILED', error=$2, updated_at=now() WHERE id=$1", job["id"], str(e)[:500])
+        return {"data": {"job_id": str(job["id"]), "status": "FAILED", "error": "AI_UNAVAILABLE"}}
+
+
+@router.get("/ai/work-orders/{oid}/inspection", summary="Latest AI inspection result")
+async def get_inspection(oid: uuid.UUID, user: dict = Depends(get_current_user)):
+    from app.deps import assert_can_read_order
+    await assert_can_read_order(user, str(oid))
+    pool = await get_pool()
+    job = await pool.fetchrow("SELECT * FROM ai_jobs WHERE work_order_id=$1::uuid ORDER BY created_at DESC LIMIT 1", str(oid))
+    review = await pool.fetchrow("SELECT * FROM ai_reviews WHERE work_order_id=$1::uuid ORDER BY attempt DESC LIMIT 1", str(oid))
+    def _s(r):
+        import uuid as _u
+        d = dict(r)
+        for k, v in list(d.items()):
+            if isinstance(v, _u.UUID):
+                d[k] = str(v)
+        return d
+    return {"data": {"job": _s(job) if job else None, "review": _s(review) if review else None}}
+
+
+@router.get("/ai/insights", summary="AI insights (alias)")
+async def ai_insights():
+    return {"data": {"hint": "Use GET /api/v1/analytics/insights and POST /api/v1/analytics/insights/generate"}}
+
+
 @router.post("/ai/suggest-assignee")
 async def suggest_assignee(body: AssigneeIn, user: dict = Depends(get_current_user)):
     require_role(user, "master")

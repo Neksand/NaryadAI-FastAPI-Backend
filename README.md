@@ -35,7 +35,9 @@ uvicorn app.main:app --reload
 
 | Переменная | Где взять бесплатно | Что включает |
 |---|---|---|
+| `AI_MODE` | `mock` (офлайн-демо) / `external` | Выбор движка ИИ |
 | `GEMINI_API_KEY` | https://aistudio.google.com — бесплатная квота, текст+зрение | Сравнение фото «до/после» (оценка 1–5), проверка соответствия работ проблеме |
+| `TELEGRAM_ENABLED` | `false` (адаптер выключен) / `true` + `TELEGRAM_BOT_TOKEN` (@BotFather) | Push-уведомления — опциональный канал; ядро работает без него |
 | `OPENROUTER_API_KEY` | https://openrouter.ai — бесплатные `:free` модели | Текстовая проверка вместо локальной эвристики |
 | `GROQ_API_KEY` | https://console.groq.com — бесплатный тир | Текст + транскрибация голосовых заметок (`POST /ai/transcribe`) |
 | `TELEGRAM_BOT_TOKEN` + `TELEGRAM_DEFAULT_CHAT_ID` | @BotFather | Push-уведомления: новые наряды, просрочки, эскалации, вердикты ИИ |
@@ -44,27 +46,31 @@ uvicorn app.main:app --reload
 
 ## API
 
-База `/api/v1`, ошибки — `{error:{code,message,details}, request_id}`. Мутации требуют заголовок `Idempotency-Key: <UUID>` (повтор с тем же ключом возвращает сохранённый ответ — так работает офлайн-очередь клиента).
+База `/api/v1`, ошибки — `{error:{code,message,translation_key}, request_id}` (`translation_key` вида `error.invalid_work_order_state` — для `locales/ru.json`, `locales/kk.json` фронтенда). Мутации принимают `Idempotency-Key: <UUID>` (без него сервер подставит разовый — без реплея при ретрае).
 
-- Auth: `POST /auth/login|refresh|logout`, `GET /me`, `POST /devices` (android/ios/web/desktop/tauri)
-- Наряды: CRUD + `POST /work-orders/:id/transitions` (accept/queue/reject/start/pause/resume/complete/close/…), события, ai-review, отчёты, материалы, `GET /shift/board|summary`, история оборудования
-- Справочники `/dict/:type`, оборудование по QR, настройки ИИ, аудит, сброс ПИН/разблокировка, алерты
-- Аналитика: dashboard, участки, оборудование, patterns, downtime, материалы, инсайты (+ `POST /analytics/insights/generate`), рейтинги, NL-запрос
-- ИИ: `POST /ai/suggest-assignee|suggest-fault-code|transcribe`
+- Auth: `POST /auth/login|refresh|logout` (`token_type: bearer`, `user.language`), `GET /me`, `GET /auth/me`, `PATCH /users/me/preferences` (`{language: ru|kk}`), `POST /devices` (android/ios/web/desktop/tauri)
+- Наряды: CRUD + `POST /work-orders/:id/{assign,accept,reject,start,pause,resume,complete,close,rework}` и общий `/transitions`, `GET /work-orders/my|my/active|my/history`, события, ai-review, отчёты, материалы, `GET /shift/board|summary`, история оборудования
+- Каталоги: `/sites`, `/teams`, `/equipment`, `/materials`, `/fault-codes` (чтение); мутации — `/dict/:type` (admin)
+- Уведомления: `GET /notifications`, `POST /notifications/:id/read|read-all` (in-app + WebSocket ядро, Telegram — опционально)
+- Аналитика: `/analytics/{overview,work-orders,workers,equipment,downtime,ai-insights,...}`
+- ИИ (`AI_MODE=mock` по умолчанию, без ключей и интернета): `POST /ai/work-orders/:id/{recommend-worker,inspect}`, `GET .../inspection`, `/ai/insights`, `suggest-assignee|fault-code`, `transcribe`
 - Отчёты: `POST /reports/export` → `202 {job_id}` → `GET /reports/export/:job_id` (PDF/XLSX)
-- Фото: JPEG/PNG/WebP до `MAX_UPLOAD_BYTES`, приватное хранение, подписанные ссылки
-- Realtime: WebSocket `/ws?token=` — каналы `order:*`, `shift:current`, `user:*`
+- Фото: JPEG/PNG/WebP до `MAX_UPLOAD_BYTES`, dHash-дубликаты, EXIF-свежесть, приватное хранение, подписанные ссылки
+- Realtime: WebSocket `/api/ws?token=` (алиас `/ws`) — каналы `order:*`, `shift:current`, `user:*`; события `WORK_ORDER_*`, `AI_INSPECTION_*`, `DEADLINE_*`
 
 ## Структура
 
 ```
 app/main.py            сборка приложения, health, lifespan-воркеры
-app/routers/           auth, work_orders, admin, analytics, ai, reports, photos, realtime
+app/routers/           auth, users (workers/preferences), catalog (sites/teams/...),
+                       work_orders (+ per-action + my/*), admin, analytics (+алиасы),
+                       ai (+контракт), reports, photos, notifications, realtime (/api/ws)
 app/services/          ai_review (rules-v1), insights (детектор аномалий),
-                       reports (XLSX/PDF), background (outbox 500мс, дедлайны 30с, инсайты 6ч)
+                       reports (XLSX/PDF), background (outbox+уведомления+WS, дедлайны, инсайты)
+app/ai/                gateway + mock (ru/kk) + vision/inspection/recommendation/anomaly/reports
+app/notifications.py   NotificationService (ru/kk шаблоны, персистентность, Telegram-адаптер)
 app/ai_providers.py    внешние ИИ (все опциональны, fallback — локально)
-app/notify.py          Telegram + FCM-хук
-migrations/            схема PostgreSQL (outbox, idempotency, immutable-журналы)
-scripts/               migrate, seed (4 участка / 25 единиц / 19 сотрудников / 20 шифров / 40 материалов / 500 нарядов), create_admin
-tests/                 test_health, test_demo_flow (сквозной сценарий §11)
+migrations/            схема PostgreSQL (outbox, idempotency, notifications, ai_jobs, immutable-журналы)
+scripts/               migrate, seed (4 участка / 25 единиц / 19 сотрудников / 20 шифров / 40 материалов / 500 нарядов + 5 паттернов), create_admin
+tests/                 test_health, test_demo_flow (сквозной сценарий §11), test_contract (§41)
 ```

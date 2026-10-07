@@ -30,7 +30,7 @@ async def create_export(body: ExportIn, request: Request, user: dict = Depends(g
         await assert_can_read_order(user, str(body.work_order_id))
     elif user["role"] not in ("master", "manager", "admin"):
         raise forbidden()
-    key = request.headers.get("idempotency-key")
+    key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
     h = sha256_hex(json.dumps({"body": body.model_dump(mode="json")}, sort_keys=True, default=str))
 
     async def action(conn):

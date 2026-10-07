@@ -173,7 +173,11 @@ async def main() -> None:
                 priority = "critical" if (kind == "unplanned" and n % 16 == 0) else ("planned" if kind == "planned" else ("high" if n % 3 == 0 else "normal"))
                 issued = NOW - timedelta(days=n % 90, minutes=n % 1400)
                 due = issued + timedelta(minutes=45 if priority == "critical" else 180)
-                done = issued + timedelta(minutes=60 + n % 150) if status in ("closed", "ai_review") else None
+                # Planted pattern 5: crew 3 (workers[10:15]) is slower, worker15 scores low
+                slow = worker in workers[10:]
+                low = worker == workers[-1]
+                work_min = 60 + n % 150 + (180 if slow else 0) + (120 if low else 0)
+                done = issued + timedelta(minutes=work_min) if status in ("closed", "ai_review") else None
                 num += 1
                 row = await conn.fetchrow(
                     """INSERT INTO work_orders(number,kind,description,area_id,equipment_id,assignee_id,master_id,priority,
@@ -186,11 +190,12 @@ async def main() -> None:
                 await conn.execute("INSERT INTO work_order_events(work_order_id,actor_id,action,payload) VALUES ($1::uuid,$2::uuid,'issued',$3::jsonb)",
                                    oid, master, json.dumps({"seed": True}))
                 if status in ("closed", "ai_review"):
+                    score = (45 + (n % 20)) if worker == workers[-1] else (65 + (n % 36))
                     await conn.execute(
                         """INSERT INTO ai_reviews(work_order_id,attempt,verdict,score,confidence,checks,explanation,
                            strengths,improvements,model,input_hash) VALUES ($1::uuid,1,'accepted',$2,0.78,'{}'::jsonb,
                            'Демо-оценка для проверки интерфейса.','[]'::jsonb,'[]'::jsonb,'seed-v1',$3)""",
-                        oid, 65 + (n % 36), f"seed-{n}")
+                        oid, score, f"seed-{n}")
                     if n % 7 == 0:
                         mat = material_ids[ei % len(material_ids)]
                         unit = await conn.fetchval("SELECT unit FROM materials WHERE id=$1::uuid", mat)
@@ -217,7 +222,7 @@ async def main() -> None:
             typ, sev, json.dumps({"equipment_id": eq["id"], "area_id": eq["area"]}), head,
             json.dumps([{"metric": "sample_count", "value": 7, "baseline": 2.3}]), rec, conf)
 
-    print(f"Seed OK: areas=4, equipment=25, employees={3 + len(workers)}, faults=20, materials={len(material_ids)}, orders>=500")
+    print(f"Seed OK: areas=4, equipment=25, employees=19, faults=20, materials={len(material_ids)}, orders>=500")
     await close_pool()
 
 

@@ -25,6 +25,7 @@ class Settings(BaseSettings):
     SEED_ADMIN_PIN: str = "1234"
     PDF_FONT_PATH: str = ""
     # --- External AI (all optional, local rules-v1 works without keys) ---
+    AI_MODE: str = "mock"
     AI_TEXT_PROVIDER: str = "auto"
     AI_VISION_PROVIDER: str = "auto"
     GEMINI_API_KEY: str = ""
@@ -35,8 +36,13 @@ class Settings(BaseSettings):
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
     GROQ_WHISPER_MODEL: str = "whisper-large-v3-turbo"
     # --- Push ---
+    TELEGRAM_ENABLED: str = "false"
+    PUSH_ENABLED: str = "false"
     TELEGRAM_BOT_TOKEN: str = ""
     TELEGRAM_DEFAULT_CHAT_ID: str = ""
+    # --- Storage ---
+    STORAGE_TYPE: str = "s3"
+    STORAGE_PATH: str = "./storage"
 
     @property
     def cors_origins(self) -> list[str]:

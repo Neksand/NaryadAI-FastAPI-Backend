@@ -135,6 +135,13 @@ async def run_idempotent(key: str | None, user_id: str, request_hash: str, actio
 
     if not key:
         raise conflict("idempotency_key_required", "Требуется заголовок Idempotency-Key")
+    if key.startswith("auto-"):
+        # No client key: run once without replay (contract-friendly DX).
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                result = await action(conn)
+                return {"status_code": int(result["statusCode"]), "body": result["body"], "replayed": False}
     try:
         uuid.UUID(key)
     except ValueError:
