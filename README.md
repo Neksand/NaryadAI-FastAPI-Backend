@@ -25,11 +25,3 @@ uvicorn app.main:app --host 0.0.0.0 --port 8080 --reload
 Docker: `docker compose up --build` (миграции выполняются перед стартом API).
 OpenAPI: `/openapi.json`, docs: `/docs`, health: `/health/live`, `/health/ready`.
 Prod: `python -m scripts.migrate && python -m scripts.create_admin`.
-
-## Отличия от TS
-
-- Очереди BullMQ заменены asyncio-воркерами в том же процессе.
-- JWT: PyJWT HS256, те же claims (`sub/sid/role/area_ids/crew_id/authv`).
-- Ошибки: тот же envelope `{error:{code,message,details},request_id}`.
-- `Idempotency-Key: UUID` обязателен на мутациях; повтор с другим хешем → 409.
-- Вне Docker задайте `PDF_FONT_PATH` на Unicode TTF, иначе PDF-экспорт упадёт.
