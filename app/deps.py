@@ -68,6 +68,16 @@ def require_role(user: dict, *roles: str) -> None:
         raise forbidden()
 
 
+def require_any_role(user: dict, *roles: str) -> None:
+    """Alias of require_role for the product contract (§6)."""
+    require_role(user, *roles)
+
+
+async def require_work_order_access(user: dict, order_id: str) -> dict:
+    """Contract alias: assert access and return the order row."""
+    return await assert_can_read_order(user, order_id)
+
+
 async def assert_can_read_order(user: dict, order_id: str) -> dict:
     pool = await get_pool()
     row = await pool.fetchrow("SELECT * FROM work_orders WHERE id = $1", order_id)

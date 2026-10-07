@@ -58,6 +58,30 @@ uvicorn app.main:app --reload
 - Фото: JPEG/PNG/WebP до `MAX_UPLOAD_BYTES`, dHash-дубликаты, EXIF-свежесть, приватное хранение, подписанные ссылки
 - Realtime: WebSocket `/api/ws?token=` (алиас `/ws`) — каналы `order:*`, `shift:current`, `user:*`; события `WORK_ORDER_*`, `AI_INSPECTION_*`, `DEADLINE_*`
 
+## Контракт: маппинг значений спеки
+
+БД хранит стабильные технические идентификаторы (английский, нижний регистр).
+Фронтенд маппит их на ru/kk через `locales/*.json` + `translation_key` ошибок.
+
+| Спека | Бэкенд (`status`) | Примечание |
+|---|---|---|
+| CREATED/ASSIGNED | `issued` | наряд выдан мастером |
+| ACCEPTED | `accepted` | исполнитель принял |
+| REJECTED | `rejected` | с `reason_code` |
+| IN_PROGRESS | `in_progress` | включая `resume` из `paused` |
+| PAUSED/RESUMED | `paused` → `in_progress` | пауза с причиной |
+| COMPLETED/AI_CHECK | `done` → `ai_review` | `done` — мгновенное, `ai_review` — на проверке |
+| CLOSED | `closed` | решение мастера финальное |
+| REWORK_REQUIRED | `rework` | возврат с комментарием |
+| (отмена) | `cancelled`, `queued` | очередь/отмена — расширение кейса §4 |
+
+| Спека (приоритет) | Бэкенд |
+|---|---|
+| CRITICAL | `critical` (красный, эскалация за 3 мин) |
+| HIGH | `high` |
+| MEDIUM | `normal` |
+| LOW | `planned` |
+
 ## Структура
 
 ```

@@ -124,6 +124,45 @@ async def upload_to_order(order_id: uuid.UUID, kind: str = Form(...), file: Uplo
     return await _create_photo(user, await file.read(), file.content_type or "", kind, str(order_id))
 
 
+@router.get("/work-orders/{order_id}/photos", summary="List order photos")
+async def list_order_photos(order_id: uuid.UUID, user: dict = Depends(get_current_user)):
+    await assert_can_read_order(user, str(order_id))
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, kind, object_key AS file_key, content_type, size_bytes, taken_at, author_id FROM photos WHERE work_order_id=$1::uuid ORDER BY created_at",
+        str(order_id))
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["id"] = str(d["id"])
+        d["author_id"] = str(d["author_id"])
+        d["url"] = signed_url(d.pop("file_key"), 300)
+        d["expires_in"] = 300
+        out.append(d)
+    return {"data": out}
+
+
+@router.delete("/photos/{photo_id}", summary="Delete a pending photo")
+async def delete_photo(photo_id: uuid.UUID, user: dict = Depends(get_current_user)):
+    """Only unlinked (pending) photos can be removed, by author or master/admin."""
+    from app.storage import get_s3
+    from app.config import settings as _s
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM photos WHERE id=$1::uuid", str(photo_id))
+    if not row:
+        raise not_found("Фото не найдено")
+    if row["work_order_id"] is not None:
+        raise forbidden("Фото уже привязано к наряду")
+    if str(row["author_id"]) != user["id"] and user["role"] not in ("master", "admin"):
+        raise forbidden()
+    await pool.execute("DELETE FROM photos WHERE id=$1::uuid", str(photo_id))
+    try:
+        get_s3().delete_object(Bucket=_s.S3_BUCKET, Key=row["object_key"])
+    except Exception:
+        pass
+    return {"data": {"id": str(photo_id), "deleted": True}}
+
+
 @router.get("/photos/{photo_id}/url")
 async def photo_url(photo_id: uuid.UUID, user: dict = Depends(get_current_user)):
     pool = await get_pool()

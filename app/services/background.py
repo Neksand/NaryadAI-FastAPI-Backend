@@ -80,6 +80,10 @@ async def _notify_for_event(conn, event: str, payload: dict, channels: list[str]
             rows = []
     try:
         await broadcast(channels, ws_type, {**data, "notifications": [r["id"] for r in rows]})
+        if rows:
+            await broadcast(channels, "NOTIFICATION_CREATED",
+                            {"notifications": rows, "related_entity_type": "work_order",
+                             "related_entity_id": str(oid) if oid else None})
     except Exception:
         pass
     try:

@@ -166,6 +166,60 @@ def test_analytics_contract():
         assert len(c.get("/api/v1/materials", headers=mh).json()["data"]) >= 40
 
 
+def test_analytics_ratings_quality_faults_trends():
+    with _client() as c:
+        m = _login(c, "manager1", "2222")
+        mh = {"Authorization": f"Bearer {m['access_token']}"}
+        r = c.get("/api/v1/analytics/ratings?group_by=employee", headers=mh).json()["data"]
+        assert len(r) > 5
+        top = r[0]
+        assert 0 <= top["rating"] <= 100 and "formula" in top
+        assert any(x["low_data"] is False for x in r)
+        q = c.get("/api/v1/analytics/quality", headers=mh).json()["data"]
+        assert q["reviews"] > 100 and 0 <= (q["ai_pass_rate"] or 0) <= 1
+        assert q["rework_rate"] is not None
+        f = c.get("/api/v1/analytics/faults", headers=mh).json()["data"]
+        assert f and any(x["code"] == "М-02" and x["n"] >= 50 for x in f)
+        t = c.get("/api/v1/analytics/trends?days=7", headers=mh).json()["data"]
+        assert len(t) == 7 and "created" in t[0]
+        g = c.get("/api/v1/analytics/ratings?group_by=crew", headers=mh).json()["data"]
+        assert len(g) >= 1
+
+
+def test_photos_list_delete_and_ai_inspect():
+    import io
+    with _client() as c:
+        m = _login(c, "master1", "3333")
+        mh = {"Authorization": f"Bearer {m['access_token']}"}
+        w = _login(c, "worker05", "1005")
+        wh = {"Authorization": f"Bearer {w['access_token']}"}
+        me = c.get("/api/v1/me", headers=wh).json()
+        eq = [e for e in c.get("/api/v1/dict/equipment", headers=mh).json()["items"]
+              if e["area_id"] in me["area_ids"]][0]
+        from datetime import datetime, timedelta, timezone
+        due = (datetime.now(timezone.utc) + timedelta(hours=4)).isoformat()
+        r = c.post("/api/v1/work-orders", headers={**mh, "Idempotency-Key": str(uuid.uuid4())},
+                   json={"kind": "planned", "description": "Фото-контракт",
+                         "equipment_id": eq["id"], "assignee_id": w["user"]["id"],
+                         "priority": "normal", "due_at": due})
+        oid = r.json()["id"]
+        # standalone pending photo then delete
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.new("RGB", (32, 32), (10, 200, 10)).save(buf, format="PNG")
+        r = c.post("/api/v1/photos", headers=mh,
+                   files={"file": ("b.png", buf.getvalue(), "image/png")}, data={"kind": "before"})
+        pid = r.json()["id"]
+        assert c.delete(f"/api/v1/photos/{pid}", headers=mh).json()["data"]["deleted"] is True
+        # recommend-worker + inspect contracts
+        rec = c.post(f"/api/v1/ai/work-orders/{oid}/recommend-worker", headers=mh).json()["data"]
+        assert "recommended_worker_id" in rec and "confidence" in rec
+        insp = c.post(f"/api/v1/ai/work-orders/{oid}/inspect", headers=mh).json()["data"]
+        assert insp["status"] in ("COMPLETED", "FAILED")
+        got = c.get(f"/api/v1/ai/work-orders/{oid}/inspection", headers=mh).json()["data"]
+        assert got["job"] is not None
+
+
 def test_websocket_subscribe_and_push():
     with _client() as c:
         m = _login(c, "master1", "3333")

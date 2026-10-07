@@ -121,4 +121,27 @@ async def generate_insights(conn) -> list[str]:
                       f"{r['eq_name']}: простой {round(r['hours'], 1)} ч за 30 дней — максимум по парку",
                       [{"metric": "downtime_hours", "value": round(r['hours'], 1)}],
                       "Разберите причины простоев по шифрам и включите узел в план ППР.", 0.6)
+    # 7. executor_pattern via z-score on durations (baseline = previous 60-30d)
+    rows = await conn.fetch(
+        """WITH cur AS (
+             SELECT assignee_id, AVG(EXTRACT(EPOCH FROM (done_at-started_at))/60)::float AS avg_min, count(*)::int AS n
+             FROM work_orders WHERE assignee_id IS NOT NULL AND done_at IS NOT NULL AND started_at IS NOT NULL
+               AND issued_at >= now()-interval '30 days' GROUP BY assignee_id HAVING count(*) >= 4),
+           base AS (
+             SELECT assignee_id, AVG(EXTRACT(EPOCH FROM (done_at-started_at))/60)::float AS avg_min,
+                    COALESCE(stddev_samp(EXTRACT(EPOCH FROM (done_at-started_at))/60), 0)::float AS sd
+             FROM work_orders WHERE assignee_id IS NOT NULL AND done_at IS NOT NULL AND started_at IS NOT NULL
+               AND issued_at >= now()-interval '90 days' AND issued_at < now()-interval '30 days'
+             GROUP BY assignee_id)
+           SELECT c.assignee_id, e.full_name, c.avg_min AS cur_min, b.avg_min AS base_min, b.sd, c.n
+           FROM cur c JOIN base b ON b.assignee_id=c.assignee_id JOIN employees e ON e.id=c.assignee_id""")
+    for r in rows:
+        denom = r["sd"] if (r["sd"] or 0) > 1e-6 else max((r["base_min"] or 1) * 0.2, 1.0)
+        z = ((r["cur_min"] or 0) - (r["base_min"] or 0)) / denom
+        if z >= 2.0:
+            pct = round(((r["cur_min"] or 0) / (r["base_min"] or 1) - 1) * 100)
+            await add("executor_pattern", "warning", {"employee_id": str(r["assignee_id"])},
+                      f"{r['full_name']}: среднее время {round(r['cur_min'])} мин против базовых {round(r['base_min'] or 0)} (+{pct}%, z={round(z, 1)})",
+                      [{"metric": "duration_z", "value": round(z, 2), "baseline": round(r["base_min"] or 0, 1)}],
+                      "Разберите причины slowdown: очередь, оборудование или пропуск шагов.", 0.62)
     return created

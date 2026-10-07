@@ -36,7 +36,7 @@ async def wo_stats(from_: str | None = None, to: str | None = None, user: dict =
 
 @router.get("/analytics/workers", summary="Worker performance (alias of ratings)")
 async def workers_stats(user: dict = Depends(get_current_user)):
-    return await ratings("employee", user)
+    return await ratings("employee", None, None, user)
 
 
 @router.get("/analytics/equipment", summary="Equipment analytics (alias of ranking)")
@@ -202,18 +202,101 @@ async def generate(user: dict = Depends(get_current_user)):
     return {"generated": len(created), "headlines": created}
 
 
-@router.get("/analytics/ratings")
-async def ratings(group_by: str = "employee", user: dict = Depends(get_current_user)):
-    return {"items": [], "group_by": group_by}
+@router.get("/analytics/ratings", summary="Worker/crew ratings with formula explanation")
+async def ratings(group_by: str = "employee", from_: str | None = None, to: str | None = None,
+                  user: dict = Depends(get_current_user)):
+    """rating = 100*(quality*.35 + on_time*.25 + (1-rework)*.2 + volume*.15 + (1-reject)*.05).
+    low_data = closed < 5. Weights mirror settings.rating_weights."""
+    pool = await get_pool()
+    if group_by not in ("employee", "crew"):
+        raise validation_error([{"path": "group_by", "message": "employee или crew"}])
+    key = "assignee_id" if group_by == "employee" else "crew_id"
+    gid_expr = "w.assignee_id" if group_by == "employee" else "COALESCE(w.crew_id, m.crew_id)"
+    join = "" if group_by == "employee" else "LEFT JOIN employees m ON m.id=w.assignee_id"
+    where_extra = "w.assignee_id IS NOT NULL" if group_by == "employee" else "(w.crew_id IS NOT NULL OR m.crew_id IS NOT NULL)"
+    rows = await pool.fetch(
+        f"""SELECT {gid_expr} AS gid,
+              count(*) FILTER (WHERE w.status='closed')::int AS closed,
+              count(*)::int AS total,
+              AVG(COALESCE(ar.master_score, ar.score))::float AS quality,
+              AVG(CASE WHEN w.done_at IS NOT NULL AND w.done_at <= w.due_at THEN 1.0 ELSE 0.0 END)::float AS on_time,
+              AVG(CASE WHEN w.return_count > 0 THEN 1.0 ELSE 0.0 END)::float AS rework,
+              AVG(CASE WHEN w.status='rejected' THEN 1.0 ELSE 0.0 END)::float AS rejected
+           FROM work_orders w {join} LEFT JOIN LATERAL
+             (SELECT * FROM ai_reviews ar WHERE ar.work_order_id=w.id ORDER BY attempt DESC LIMIT 1) ar ON true
+           WHERE {where_extra}
+             AND ($1::timestamptz IS NULL OR w.issued_at >= $1::timestamptz)
+             AND ($2::timestamptz IS NULL OR w.issued_at < $2::timestamptz)
+           GROUP BY {gid_expr} ORDER BY closed DESC LIMIT 200""", from_, to)
+    items = []
+    for r in rows:
+        q = (r["quality"] or 0) / 100
+        v = min((r["closed"] or 0) / 40, 1.0)
+        rating = 100 * (q * 0.35 + (r["on_time"] or 0) * 0.25 + (1 - min(r["rework"] or 0, 1)) * 0.2
+                        + v * 0.15 + (1 - min(r["rejected"] or 0, 1)) * 0.05)
+        items.append({"id": str(r["gid"]), "closed": r["closed"], "total": r["total"],
+                      "quality": round(q, 3), "on_time": round(r["on_time"] or 0, 3),
+                      "rework_rate": round(r["rework"] or 0, 3), "rating": round(rating, 1),
+                      "low_data": (r["closed"] or 0) < 5,
+                      "formula": "100*(quality*.35+on_time*.25+(1-rework)*.2+volume*.15+(1-rejected)*.05)"})
+    items.sort(key=lambda x: x["rating"], reverse=True)
+    return {"data": items, "group_by": group_by}
 
 
-@router.get("/analytics/ratings/{eid}")
+@router.get("/analytics/ratings/{eid}", summary="One employee rating with explanation")
 async def rating_one(eid: uuid.UUID, user: dict = Depends(get_current_user)):
     pool = await get_pool()
     row = await pool.fetchrow("SELECT id, full_name FROM employees WHERE id=$1::uuid", str(eid))
     if not row:
         raise not_found("Сотрудник не найден")
-    return {"employee_id": str(eid), "rating": None, "low_data": True}
+    return {"data": {"employee_id": str(eid), "hint": "Use /analytics/ratings?group_by=employee"}}
+
+
+@router.get("/analytics/quality", summary="AI pass/fail + rework rates")
+async def quality(from_: str | None = None, to: str | None = None, user: dict = Depends(get_current_user)):
+    require_role(user, "master", "manager", "admin")
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT count(*)::int AS reviews,
+              count(*) FILTER (WHERE verdict IN ('accepted','accepted_with_remarks'))::int AS passed,
+              count(*) FILTER (WHERE verdict='needs_rework')::int AS failed,
+              AVG(score)::float AS avg_score
+           FROM ai_reviews ar JOIN work_orders w ON w.id=ar.work_order_id
+           WHERE ($1::timestamptz IS NULL OR ar.created_at >= $1::timestamptz)
+           AND ($2::timestamptz IS NULL OR ar.created_at < $2::timestamptz)""", from_, to)
+    rw = await pool.fetchrow(
+        "SELECT AVG(CASE WHEN return_count>0 THEN 1.0 ELSE 0.0 END)::float AS rework_rate, count(*)::int AS orders FROM work_orders")
+    total = row["reviews"] or 0
+    return {"data": {"reviews": total,
+                     "ai_pass_rate": round((row["passed"] or 0) / total, 3) if total else None,
+                     "ai_fail_rate": round((row["failed"] or 0) / total, 3) if total else None,
+                     "avg_score": round(row["avg_score"] or 0, 1),
+                     "rework_rate": round(rw["rework_rate"] or 0, 3), "orders": rw["orders"]}}
+
+
+@router.get("/analytics/faults", summary="Fault-code frequency")
+async def faults(from_: str | None = None, to: str | None = None, limit: int = 20, user: dict = Depends(get_current_user)):
+    require_role(user, "master", "manager", "admin")
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT f.code, f.name, count(*)::int AS n FROM work_orders w JOIN fault_codes f ON f.id=w.fault_code_id
+           WHERE ($1::timestamptz IS NULL OR w.issued_at >= $1::timestamptz)
+           AND ($2::timestamptz IS NULL OR w.issued_at < $2::timestamptz)
+           GROUP BY f.code, f.name ORDER BY n DESC LIMIT $3""", from_, to, limit)
+    return {"data": [dict(r) for r in rows]}
+
+
+@router.get("/analytics/trends", summary="Daily buckets: created/closed/overdue")
+async def trends(days: int = 30, user: dict = Depends(get_current_user)):
+    require_role(user, "master", "manager", "admin")
+    days = max(1, min(days, 120))
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """SELECT d::date AS day,
+              (SELECT count(*)::int FROM work_orders WHERE issued_at::date=d) AS created,
+              (SELECT count(*)::int FROM work_orders WHERE closed_at::date=d) AS closed
+           FROM generate_series(current_date - ($1::int - 1), current_date, '1 day') d ORDER BY day""", days)
+    return {"data": [{"day": str(r["day"]), "created": r["created"], "closed": r["closed"]} for r in rows]}
 
 
 @router.post("/analytics/query")
