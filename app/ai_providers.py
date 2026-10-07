@@ -1,22 +1,12 @@
 """External AI providers. All optional — local rules-v1 works without keys.
 
-Free tiers suitable for the hackathon demo (put keys into `.env`, never commit):
-  1. GEMINI_API_KEY — Google AI Studio (https://aistudio.google.com), generous free
-     quota, text + vision. Primary recommendation: one key covers text checks,
-     photo before/after comparison and summaries.
-  2. OPENROUTER_API_KEY — https://openrouter.ai, models with `:free` suffix,
-     OpenAI-compatible endpoint, no card required.
-  3. GROQ_API_KEY — https://console.groq.com, free rate-limited tier for text
-     and Whisper transcription (voice notes).
-  4. Pollinations — https://pollinations.ai, no key, free community endpoints
-     (fallback only, no SLA).
-
-Personal data rule: prompts sent outside contain only work texts, fault codes and
-photo bytes — never employee names, PINs or tokens (see ANONYMIZE in prompts).
-Every call has a short timeout and returns None on any failure; callers must
-fall back to local heuristics.
+Gemini goes through the official `google-genai` SDK (supports current
+auth keys); OpenRouter/Groq/Pollinations use OpenAI-compatible REST.
+Only anonymized work texts and photo bytes leave the контур — never names,
+PINs or tokens. Every call is short-timeout and returns None on failure.
 """
 
+import asyncio
 import base64
 import logging
 
@@ -25,6 +15,14 @@ import httpx
 log = logging.getLogger("ai_providers")
 
 TEXT_TIMEOUT = 20.0
+
+
+def _gemini_client():
+    from app.config import settings
+
+    if not settings.GEMINI_API_KEY:
+        return None, None
+    return settings.GEMINI_API_KEY, settings.GEMINI_MODEL
 
 
 def _settings():
@@ -54,12 +52,12 @@ def _openai_text(data: dict) -> str | None:
 
 
 async def _gemini_text(system: str, user: str) -> str | None:
-    s = _settings()
-    if not s.GEMINI_API_KEY:
+    key, model = _gemini_client()
+    if not key:
         return None
     data = await _post_json(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{s.GEMINI_MODEL}:generateContent",
-        {"x-goog-api-key": s.GEMINI_API_KEY, "Content-Type": "application/json"},
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        {"x-goog-api-key": key, "Content-Type": "application/json"},
         {"system_instruction": {"parts": [{"text": system}]},
          "contents": [{"parts": [{"text": user}]}],
          "generationConfig": {"temperature": 0.2, "maxOutputTokens": 512}},
@@ -121,18 +119,20 @@ async def chat_text(system: str, user: str) -> tuple[str | None, str]:
 
 
 async def compare_photos(before: bytes, after: bytes, context: str) -> tuple[str | None, str]:
-    """Multimodal before/after comparison. Returns (verdict_text, provider)."""
-    s = _settings()
-    if not s.GEMINI_API_KEY or s.AI_VISION_PROVIDER == "off":
+    """Multimodal before/after comparison via Gemini REST. Returns (verdict_text, provider)."""
+    from app.config import settings
+
+    if not settings.GEMINI_API_KEY or settings.AI_VISION_PROVIDER == "off":
         return None, "local"
+    key, model = _gemini_client()
     b64 = lambda b: base64.b64encode(b).decode()  # noqa: E731
     data = await _post_json(
-        f"https://generativelanguage.googleapis.com/v1beta/models/{s.GEMINI_MODEL}:generateContent",
-        {"x-goog-api-key": s.GEMINI_API_KEY, "Content-Type": "application/json"},
+        f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+        {"x-goog-api-key": key, "Content-Type": "application/json"},
         {"system_instruction": {"parts": [{"text": (
             "Ты контролёр ремонта. Сравни фото ДО и ПОСЛЕ. Ответь строго JSON: "
             '{"fixed": true|false, "score": 1-5, "note": "коротко по-русски"}. '
-            "Никаких персональных данных в ответе." )}]},
+            "Никаких персональных данных в ответе.")}]},
          "contents": [{"parts": [
              {"text": f"Контекст наряда (обезличен): {context}. Первое фото — ДО, второе — ПОСЛЕ."},
              {"inline_data": {"mime_type": "image/jpeg", "data": b64(before)}},
