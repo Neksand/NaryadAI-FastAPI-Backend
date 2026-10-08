@@ -53,6 +53,14 @@ async def list_dict(ctype: str, q: str | None = None, area_id: str | None = None
             if isinstance(v, uuid.UUID):
                 d[k] = str(v)
         out.append(d)
+    if ctype == "employees" and out:
+        # Участки лежат в связке employee_areas — прикладываем для редактирования в админке.
+        links = await pool.fetch(
+            "SELECT employee_id, array_agg(area_id::text) AS area_ids FROM employee_areas WHERE employee_id = ANY($1::uuid[]) GROUP BY employee_id",
+            [d["id"] for d in out])
+        by_emp = {str(l["employee_id"]): list(l["area_ids"] or []) for l in links}
+        for d in out:
+            d["area_ids"] = by_emp.get(d["id"], [])
     return {"items": out}
 
 
@@ -73,7 +81,7 @@ async def create_dict(ctype: str, body: dict, user: dict = Depends(get_current_u
             body.get("crew_id"), body.get("shift", "1"))
         for a in body.get("area_ids", []):
             await pool.execute("INSERT INTO employee_areas(employee_id, area_id) VALUES ($1::uuid,$2::uuid) ON CONFLICT DO NOTHING", str(row["id"]), a)
-        return {"id": str(row["id"])}
+        return {"id": str(row["id"]), "area_ids": list(body.get("area_ids", []))}
     meta = CATALOGUES[ctype]
     cols = [c for c in meta["cols"] if c in body]
     if not cols:
@@ -90,15 +98,29 @@ async def patch_dict(ctype: str, item_id: uuid.UUID, body: dict, user: dict = De
     if ctype not in CATALOGUES or (ctype == "employees" and "pin" in body):
         raise not_found("Справочник не найден") if ctype not in CATALOGUES else validation_error([{"path": "pin", "message": "ПИН меняется через reset-pin"}])
     pool = await get_pool()
+    if ctype == "employees" and "area_ids" in body:
+        # Синхронизация участков существующего сотрудника (раньше задавались только при создании).
+        aids = body.get("area_ids") or []
+        if not isinstance(aids, list) or any(not isinstance(a, str) for a in aids):
+            raise validation_error([{"path": "area_ids", "message": "Нужен массив UUID участков"}])
+        try:
+            await pool.execute("DELETE FROM employee_areas WHERE employee_id=$1::uuid", str(item_id))
+            for a in aids:
+                await pool.execute(
+                    "INSERT INTO employee_areas(employee_id, area_id) VALUES ($1::uuid,$2::uuid) ON CONFLICT DO NOTHING",
+                    str(item_id), a)
+        except Exception:
+            raise validation_error([{"path": "area_ids", "message": "Нет такого участка"}])
     sets, vals = [], []
     for k, v in body.items():
         if k in CATALOGUES[ctype]["cols"]:
             vals.append(v)
             sets.append(f"{k} = ${len(vals)}")
-    if not sets:
+    if not sets and "area_ids" not in body:
         raise validation_error([{"path": "body", "message": "Нет полей"}])
-    vals.append(str(item_id))
-    await pool.execute(f"UPDATE {CATALOGUES[ctype]['table']} SET {', '.join(sets)}, updated_at=now() WHERE id=${len(vals)}::uuid" if ctype in ("areas", "equipment", "crews", "employees") else f"UPDATE {CATALOGUES[ctype]['table']} SET {', '.join(sets)} WHERE id=${len(vals)}::uuid", *vals)
+    if sets:
+        vals.append(str(item_id))
+        await pool.execute(f"UPDATE {CATALOGUES[ctype]['table']} SET {', '.join(sets)}, updated_at=now() WHERE id=${len(vals)}::uuid" if ctype in ("areas", "equipment", "crews", "employees") else f"UPDATE {CATALOGUES[ctype]['table']} SET {', '.join(sets)} WHERE id=${len(vals)}::uuid", *vals)
     return {"id": str(item_id)}
 
 
