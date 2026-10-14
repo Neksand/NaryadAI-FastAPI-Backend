@@ -1,0 +1,13 @@
+[run]
+branch = True
+source = app
+relative_files = True
+omit =
+    */__pycache__/*
+    */.venv/*
+
+[report]
+precision = 1
+show_missing = True
+skip_covered = False
+fail_under = 90

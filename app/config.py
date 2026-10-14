@@ -35,6 +35,12 @@ class Settings(BaseSettings):
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "qwen/qwen3.8-27b"
     GROQ_WHISPER_MODEL: str = "whisper-large-v3-turbo"
+    AI_AUDIO_PROVIDER: str = "auto"
+    ESTIMIN3N_ENABLED: bool = False
+    ESTIMIN3N_MODEL_ID: str = "govnejri/Estimin3n"
+    ESTIMIN3N_DEVICE: str = "auto"
+    ESTIMIN3N_LOAD_IN_4BIT: bool = False
+    ESTIMIN3N_CACHE_DIR: str = ".hf-cache"
     # --- Push: notifications are in-app (DB) + WebSocket. No external push. ---
     PUSH_ENABLED: str = "false"
     # --- Storage ---
@@ -43,7 +49,11 @@ class Settings(BaseSettings):
 
     @property
     def cors_origins(self) -> list[str]:
-        return [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+        # Packaged Tauri apps use these fixed WebView origins. Keep the list
+        # explicit so credentialed API requests work without opening CORS to *.
+        origins = [o.strip() for o in self.CORS_ORIGINS.split(",") if o.strip()]
+        origins.extend(("tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"))
+        return list(dict.fromkeys(origins))
 
     @property
     def s3_force_path_style(self) -> bool:

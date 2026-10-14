@@ -1,30 +1,49 @@
 import asyncio
 import uuid
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 import redis.asyncio as aioredis
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 
 from app.config import settings
 from app.db import close_pool, get_pool
 from app.errors import AppError
-from app.routers import admin, ai, auth, catalog, notifications, photos, realtime, reports, users, work_orders
+from app.routers import (
+    admin,
+    ai,
+    assistant,
+    auth,
+    catalog,
+    forecast,
+    notifications,
+    photos,
+    realtime,
+    reports,
+    users,
+    work_orders,
+)
 from app.storage import ensure_upload_bucket
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI):
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from app.services.background import deadline_loop, insights_loop, outbox_loop
 
     ensure_upload_bucket()
-    tasks = [asyncio.create_task(outbox_loop()), asyncio.create_task(deadline_loop()), asyncio.create_task(insights_loop())]
+    tasks = [
+        asyncio.create_task(outbox_loop()),
+        asyncio.create_task(deadline_loop()),
+        asyncio.create_task(insights_loop()),
+    ]
     yield
     for t in tasks:
         t.cancel()
+    await asyncio.gather(*tasks, return_exceptions=True)
     await close_pool()
 
 
@@ -36,53 +55,87 @@ def create_app() -> FastAPI:
         allow_origins=settings.cors_origins or [],
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Authorization", "Content-Type", "Idempotency-Key", "Accept-Language", "X-Request-Id"],
+        allow_headers=[
+            "Authorization",
+            "Content-Type",
+            "Idempotency-Key",
+            "Accept-Language",
+            "X-Request-Id",
+        ],
     )
 
     @app.exception_handler(AppError)
-    async def app_error_handler(request: Request, exc: AppError):
+    async def app_error_handler(request: Request, exc: AppError) -> JSONResponse:
         key = exc.translation_key
         if exc.code == "invalid_transition":
             key = "error.invalid_work_order_state"
-        body: dict = {"error": {"code": exc.code, "message": exc.message, "translation_key": key}}
+        body: dict[str, Any] = {
+            "error": {"code": exc.code, "message": exc.message, "translation_key": key}
+        }
         if exc.details is not None:
             body["error"]["details"] = exc.details
         body["request_id"] = request.headers.get("x-request-id", str(uuid.uuid4()))
         return JSONResponse(status_code=exc.status_code, content=body)
 
     @app.exception_handler(RequestValidationError)
-    async def validation_handler(request: Request, exc: RequestValidationError):
-        body = {"error": {"code": "validation_error", "message": "Проверьте входные данные",
-                          "translation_key": "error.validation_error",
-                          "details": [{"path": ".".join(map(str, e["loc"])), "message": e["msg"]} for e in exc.errors()]},
-                "request_id": request.headers.get("x-request-id", str(uuid.uuid4()))}
+    async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        body = {
+            "error": {
+                "code": "validation_error",
+                "message": "Проверьте входные данные",
+                "translation_key": "error.validation_error",
+                "details": [
+                    {"path": ".".join(map(str, e["loc"])), "message": e["msg"]}
+                    for e in exc.errors()
+                ],
+            },
+            "request_id": request.headers.get("x-request-id", str(uuid.uuid4())),
+        }
         return JSONResponse(status_code=422, content=body)
 
     @app.get("/")
-    async def root():
-        return {"service": "naryadai-api", "docs": "/docs", "openapi": "/openapi.json",
-                "health": "/health/live", "ready": "/health/ready"}
+    async def root() -> dict[str, Any]:
+        return {
+            "service": "naryadai-api",
+            "docs": "/docs",
+            "openapi": "/openapi.json",
+            "health": "/health/live",
+            "ready": "/health/ready",
+        }
 
     @app.get("/health", summary="Health (contract)")
-    async def health():
+    async def health() -> dict[str, Any]:
         from app.config import settings as _s
+
         db_ok = True
         try:
             pool = await get_pool()
             await pool.fetchval("SELECT 1")
         except Exception:
             db_ok = False
-        ai = "mock" if (_s.AI_MODE or "mock") == "mock" else "configured"
-        if not (_s.GEMINI_API_KEY or _s.OPENROUTER_API_KEY or _s.GROQ_API_KEY):
+        if (_s.AI_MODE or "mock").lower() == "mock":
             ai = "mock"
-        return {"status": "ok" if db_ok else "degraded", "database": "ok" if db_ok else "down", "ai": ai}
+        elif _s.ESTIMIN3N_ENABLED and any(
+            "estimin3n" in provider.lower()
+            for provider in (_s.AI_TEXT_PROVIDER, _s.AI_VISION_PROVIDER, _s.AI_AUDIO_PROVIDER)
+        ):
+            ai = "estimin3n"
+        elif _s.GEMINI_API_KEY or _s.OPENROUTER_API_KEY or _s.GROQ_API_KEY:
+            ai = "configured"
+        else:
+            ai = "local"
+        return {
+            "status": "ok" if db_ok else "degraded",
+            "database": "ok" if db_ok else "down",
+            "ai": ai,
+        }
 
     @app.get("/health/live")
-    async def live():
+    async def live() -> dict[str, Any]:
         return {"status": "ok"}
 
-    @app.get("/health/ready")
-    async def ready():
+    @app.get("/health/ready", response_model=None)
+    async def ready() -> dict[str, Any] | JSONResponse:
         try:
             pool = await get_pool()
             await pool.fetchval("SELECT 1")
@@ -102,10 +155,16 @@ def create_app() -> FastAPI:
     app.include_router(work_orders.router, prefix="/api/v1")
     app.include_router(photos.router, prefix="/api/v1")
     app.include_router(admin.router, prefix="/api/v1")
+    app.include_router(assistant.router, prefix="/api/v1")
+    app.include_router(forecast.router, prefix="/api/v1")
+    from app.routers import import_excel as import_excel_router
+
+    app.include_router(import_excel_router.router, prefix="/api/v1")
     app.include_router(ai.router, prefix="/api/v1")
     app.include_router(reports.router, prefix="/api/v1")
     # analytics router is mounted under same prefix inside work_orders? mount separately:
     from app.routers import analytics as analytics_router
+
     app.include_router(analytics_router.router, prefix="/api/v1")
     app.include_router(realtime.router)
     return app

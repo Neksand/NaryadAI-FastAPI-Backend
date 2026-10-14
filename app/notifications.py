@@ -6,6 +6,7 @@ BUSINESS EVENT -> NotificationService.notify() -> persistent DB row
 
 import json
 import logging
+from typing import Any
 
 log = logging.getLogger("notifications")
 
@@ -17,42 +18,121 @@ def _t(ru: str, kk: str, lang: str) -> str:
 TEMPLATES = {
     "WORK_ORDER_ASSIGNED": lambda d, lang: (
         _t("Новый наряд", "Жаңа наряд", lang),
-        _t(f"Вам назначен наряд №{d['number']}.", f"Сізге №{d['number']} наряд тағайындалды.", lang)),
+        _t(
+            f"Вам назначен наряд №{d['number']}.", f"Сізге №{d['number']} наряд тағайындалды.", lang
+        ),
+    ),
     "WORK_ORDER_ACCEPTED": lambda d, lang: (
         _t("Наряд принят", "Наряд қабылданды", lang),
-        _t(f"Исполнитель принял наряд №{d['number']}.", f"Орындаушы №{d['number']} нарядты қабылдады.", lang)),
+        _t(
+            f"Исполнитель принял наряд №{d['number']}.",
+            f"Орындаушы №{d['number']} нарядты қабылдады.",
+            lang,
+        ),
+    ),
     "WORK_ORDER_REJECTED": lambda d, lang: (
         _t("Наряд отклонён", "Наряд қабылданбады", lang),
-        _t(f"Наряд №{d['number']} отклонён: {d.get('reason') or '—'}.", f"№{d['number']} наряд қабылданбады: {d.get('reason') or '—'}.", lang)),
+        _t(
+            f"Наряд №{d['number']} отклонён: {d.get('reason') or '—'}.",
+            f"№{d['number']} наряд қабылданбады: {d.get('reason') or '—'}.",
+            lang,
+        ),
+    ),
     "WORK_ORDER_STARTED": lambda d, lang: (
         _t("Работа начата", "Жұмыс басталды", lang),
-        _t(f"Наряд №{d['number']} в работе.", f"№{d['number']} наряд орындалуда.", lang)),
+        _t(f"Наряд №{d['number']} в работе.", f"№{d['number']} наряд орындалуда.", lang),
+    ),
     "WORK_ORDER_PAUSED": lambda d, lang: (
         _t("Работа приостановлена", "Жұмыс тоқтатылды", lang),
-        _t(f"Наряд №{d['number']} на паузе: {d.get('reason') or '—'}.", f"№{d['number']} наряд кідіртілді: {d.get('reason') or '—'}.", lang)),
+        _t(
+            f"Наряд №{d['number']} на паузе: {d.get('reason') or '—'}.",
+            f"№{d['number']} наряд кідіртілді: {d.get('reason') or '—'}.",
+            lang,
+        ),
+    ),
     "WORK_ORDER_COMPLETED": lambda d, lang: (
         _t("Работа выполнена", "Жұмыс орындалды", lang),
-        _t(f"Наряд №{d['number']} отправлен на проверку ИИ.", f"№{d['number']} наряд ЖИ тексеруіне жіберілді.", lang)),
+        _t(
+            f"Наряд №{d['number']} отправлен на проверку ИИ.",
+            f"№{d['number']} наряд ЖИ тексеруіне жіберілді.",
+            lang,
+        ),
+    ),
     "WORK_ORDER_CLOSED": lambda d, lang: (
         _t("Наряд закрыт", "Наряд жабылды", lang),
-        _t(f"Наряд №{d['number']} закрыт с оценкой {d.get('score', '—')}.", f"№{d['number']} наряд {d.get('score', '—')} бағамен жабылды.", lang)),
+        _t(
+            f"Наряд №{d['number']} закрыт с оценкой {d.get('score', '—')}.",
+            f"№{d['number']} наряд {d.get('score', '—')} бағамен жабылды.",
+            lang,
+        ),
+    ),
     "WORK_ORDER_REWORK": lambda d, lang: (
         _t("Доработайте наряд", "Нарядты пысықтаңыз", lang),
-        _t(f"Наряд №{d['number']} возвращён на доработку: {d.get('reason') or '—'}.", f"№{d['number']} наряд пысықтауға қайтарылды: {d.get('reason') or '—'}.", lang)),
+        _t(
+            f"Наряд №{d['number']} возвращён на доработку: {d.get('reason') or '—'}.",
+            f"№{d['number']} наряд пысықтауға қайтарылды: {d.get('reason') or '—'}.",
+            lang,
+        ),
+    ),
     "AI_INSPECTION_READY": lambda d, lang: (
         _t("Проверка ИИ готова", "ЖИ тексеруі дайын", lang),
-        _t(f"Наряд №{d['number']}: вердикт — {d.get('verdict', '—')}.", f"№{d['number']} наряд: қорытынды — {d.get('verdict', '—')}.", lang)),
+        _t(
+            f"Наряд №{d['number']}: вердикт — {d.get('verdict', '—')}.",
+            f"№{d['number']} наряд: қорытынды — {d.get('verdict', '—')}.",
+            lang,
+        ),
+    ),
     "DEADLINE_WARNING": lambda d, lang: (
         _t("Срок подходит", "Мерзімі жақындады", lang),
-        _t(f"Наряд №{d['number']}: до срока осталось {d.get('minutes_left', '—')} мин.", f"№{d['number']} наряд: мерзімге {d.get('minutes_left', '—')} мин қалды.", lang)),
+        _t(
+            f"Наряд №{d['number']}: до срока осталось {d.get('minutes_left', '—')} мин.",
+            f"№{d['number']} наряд: мерзімге {d.get('minutes_left', '—')} мин қалды.",
+            lang,
+        ),
+    ),
     "DEADLINE_EXCEEDED": lambda d, lang: (
         _t("Наряд просрочен", "Наряд мерзімінен кешікті", lang),
-        _t(f"Наряд №{d['number']} просрочен на {d.get('minutes_overdue', '—')} мин.", f"№{d['number']} наряд {d.get('minutes_overdue', '—')} мин кешікті.", lang)),
+        _t(
+            f"Наряд №{d.get('number', '?')} просрочен на {d.get('minutes_overdue', '—')} мин.",
+            f"№{d.get('number', '?')} наряд {d.get('minutes_overdue', '—')} мин кешікті.",
+            lang,
+        ),
+    ),
+    "DEADLINE_30MIN": lambda d, lang: (
+        _t("До срока осталось 30 минут", "Мерзімге 30 минут қалды", lang),
+        _t(
+            f"Наряд №{d.get('number', '?')}: до срока осталось {d.get('minutes_left', 30)} мин. Успейте завершить работу.",
+            f"№{d.get('number', '?')} наряд: мерзімге {d.get('minutes_left', 30)} мин қалды. Жұмысты уақытында аяқтаңыз.",
+            lang,
+        ),
+    ),
+    "LONG_OVERDUE_120MIN": lambda d, lang: (
+        _t("Просрочка более 2 часов", "2 сағаттан астам кешігу", lang),
+        _t(
+            f"Наряд №{d.get('number', '?')} просрочен на {d.get('minutes_overdue', '—')} мин. Требуется вмешательство.",
+            f"№{d.get('number', '?')} наряд {d.get('minutes_overdue', '—')} мин кешікті. Араласу қажет.",
+            lang,
+        ),
+    ),
+    "NOT_ACCEPTED_WITH_CANDIDATE": lambda d, lang: (
+        _t("Наряд не принят", "Наряд қабылданбады", lang),
+        _t(
+            f"Наряд №{d.get('number', '?')} не принят за {d.get('minutes_waiting', '—')} мин. Свободный исполнитель: {d.get('candidate_name') or '—'}.",
+            f"№{d.get('number', '?')} наряд {d.get('minutes_waiting', '—')} мин ішінде қабылданбады. Бос орындаушы: {d.get('candidate_name') or '—'}.",
+            lang,
+        ),
+    ),
 }
 
 
-async def notify(conn, recipient_ids: list[str], type_: str, data: dict,
-                 related_entity_type: str | None = None, related_entity_id: str | None = None) -> list[dict]:
+async def notify(
+    conn: Any,
+    recipient_ids: list[str],
+    type_: str,
+    data: dict[str, Any],
+    related_entity_type: str | None = None,
+    related_entity_id: str | None = None,
+) -> list[dict[str, Any]]:
     """Persist one notification row per recipient in the recipient's language.
 
     Must be called INSIDE the business transaction (rows commit with it).
@@ -64,12 +144,30 @@ async def notify(conn, recipient_ids: list[str], type_: str, data: dict,
         if lang not in ("ru", "kk"):
             lang = "ru"
         builder = TEMPLATES.get(type_)
-        title, message = builder(data, lang) if builder else (type_, json.dumps(data, default=str)[:300])
+        title, message = (
+            builder(data, lang) if builder else (type_, json.dumps(data, default=str)[:300])
+        )
         row = await conn.fetchrow(
             """INSERT INTO notifications(recipient_id, type, title, message, lang, related_entity_type, related_entity_id, metadata)
                VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8::jsonb)
                RETURNING id, recipient_id, type, title, message, lang, is_read, created_at""",
-            rid, type_, title, message, lang, related_entity_type, related_entity_id, json.dumps(data, default=str))
-        rows.append({"id": str(row["id"]), "recipient_id": str(row["recipient_id"]), "type": row["type"],
-                     "title": row["title"], "message": row["message"], "lang": row["lang"]})
+            rid,
+            type_,
+            title,
+            message,
+            lang,
+            related_entity_type,
+            related_entity_id,
+            json.dumps(data, default=str),
+        )
+        rows.append(
+            {
+                "id": str(row["id"]),
+                "recipient_id": str(row["recipient_id"]),
+                "type": row["type"],
+                "title": row["title"],
+                "message": row["message"],
+                "lang": row["lang"],
+            }
+        )
     return rows

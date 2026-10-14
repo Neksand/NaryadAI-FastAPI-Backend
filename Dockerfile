@@ -8,4 +8,4 @@ COPY app ./app
 COPY scripts ./scripts
 COPY migrations ./migrations
 EXPOSE 8080
-CMD ["sh", "-c", "python -m scripts.migrate && uvicorn app.main:app --host 0.0.0.0 --port 8080"]
+CMD ["sh", "-c", "python -m scripts.migrate && uvicorn app.main:app --host 0.0.0.0 --port 8080 --no-access-log"]

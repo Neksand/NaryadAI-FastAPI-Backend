@@ -1,17 +1,17 @@
-import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
+from app.db import get_pool
 from app.deps import assert_can_read_order
 from app.security import decode_access_token
-from app.db import get_pool
 
 router = APIRouter()
 
 # In-process live socket registry: user_id -> list of (websocket, channels).
 # Single-process demo/brew deployment; multi-instance fan-out goes via Redis pub.
-_connections: dict[str, list] = {}
+_connections: dict[str, list[tuple[WebSocket, set[str]]]] = {}
 
 
 def register(user_id: str, ws: WebSocket, channels: set[str]) -> None:
@@ -35,13 +35,14 @@ def channels_for(user_id: str, ws: WebSocket) -> set[str]:
     return set()
 
 
-async def broadcast(channels: list[str], type_: str, payload: dict) -> int:
+async def broadcast(channels: list[str], type_: str, payload: dict[str, Any]) -> int:
     """Deliver a typed event to subscribed sockets. Returns socket count."""
-    from app.deps import assert_can_read_order as _guard  # noqa: F401  (order guard applied at subscribe time)
+    from app.deps import assert_can_read_order as _guard  # noqa: F401 - keep deps loaded
+
     targets = set(channels)
-    envelope = {"type": type_, "timestamp": datetime.now(timezone.utc).isoformat(), "payload": payload}
+    envelope = {"type": type_, "timestamp": datetime.now(UTC).isoformat(), "payload": payload}
     sent = 0
-    for uid, lst in list(_connections.items()):
+    for _uid, lst in list(_connections.items()):
         for ws, subscribed in list(lst):
             if not (subscribed & targets):
                 continue
@@ -55,7 +56,7 @@ async def broadcast(channels: list[str], type_: str, payload: dict) -> int:
     return sent
 
 
-async def _user_from_token(token: str) -> dict | None:
+async def _user_from_token(token: str) -> dict[str, Any] | None:
     try:
         claims = decode_access_token(token)
     except Exception:
@@ -67,20 +68,28 @@ async def _user_from_token(token: str) -> dict | None:
                       COALESCE(array_agg(ea.area_id) FILTER (WHERE ea.area_id IS NOT NULL), '{}') AS area_ids
                FROM employees e LEFT JOIN employee_areas ea ON ea.employee_id=e.id
                WHERE e.id=$1 AND e.enabled=true AND e.deleted_at IS NULL GROUP BY e.id""",
-            str(claims.get("sub")))
+            str(claims.get("sub")),
+        )
         if not row or int(row["auth_version"]) != int(claims.get("authv", -1)):
             return None
-        sess = await pool.fetchrow("SELECT id FROM refresh_sessions WHERE id=$1 AND revoked_at IS NULL AND expires_at > now()", str(claims.get("sid")))
+        sess = await pool.fetchrow(
+            "SELECT id FROM refresh_sessions WHERE id=$1 AND revoked_at IS NULL AND expires_at > now()",
+            str(claims.get("sid")),
+        )
         if not sess:
             return None
-        return {"id": str(row["id"]), "role": row["role"], "lang": row["lang"],
-                "areaIds": [str(a) for a in (row["area_ids"] or [])],
-                "crewId": str(row["crew_id"]) if row["crew_id"] else None}
+        return {
+            "id": str(row["id"]),
+            "role": row["role"],
+            "lang": row["lang"],
+            "areaIds": [str(a) for a in (row["area_ids"] or [])],
+            "crewId": str(row["crew_id"]) if row["crew_id"] else None,
+        }
     except Exception:
         return None
 
 
-async def _handle(ws: WebSocket):
+async def _handle(ws: WebSocket) -> None:
     await ws.accept()
     token = ws.query_params.get("token", "")
     user = await _user_from_token(token)
@@ -124,11 +133,11 @@ async def _handle(ws: WebSocket):
 
 
 @router.websocket("/ws")
-async def ws(ws: WebSocket):
+async def ws(ws: WebSocket) -> None:
     await _handle(ws)
 
 
 @router.websocket("/api/ws")
-async def api_ws(ws: WebSocket):
+async def api_ws(ws: WebSocket) -> None:
     """Canonical path per product contract (same handler as /ws)."""
     await _handle(ws)

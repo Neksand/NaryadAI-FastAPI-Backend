@@ -1,9 +1,9 @@
-from fastapi.testclient import TestClient
-
-
 def test_import_app():
     from app.main import create_app
+
     app = create_app()
-    routes = {r.path for r in app.routes}
-    assert "/health/live" in routes
-    assert "/openapi.json" in {r.path for r in app.routes} or True
+    # FastAPI 0.143+ stores included routers as lazy _IncludedRouter entries,
+    # so inspect the public schema instead of relying on app.routes internals.
+    paths = app.openapi()["paths"]
+    assert "/health/live" in paths
+    assert "/api/v1/work-orders" in paths

@@ -1,7 +1,42 @@
+# Python
 .venv/
 __pycache__/
 *.pyc
+*.pyo
+
+# Secrets / local config (keep only *.example)
 .env
+.env.server
+.env.docker
+.env.local
+*.local.txt
+
+# Build & packaging
+build/
 dist/
+*.egg-info/
+*.whl
+
+# Test & coverage
 .pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+coverage.xml
+coverage.json
+htmlcov/
+
+# Local model weights & caches
+.hf-cache/
+
+# Local runtime data
+storage/
+
+# Documents (large binary inputs, not for the repo)
 *.pdf
+CASE1.pdf
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

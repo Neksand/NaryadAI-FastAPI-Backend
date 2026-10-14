@@ -1,6 +1,7 @@
 import hashlib
 import secrets
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import jwt
 from argon2 import PasswordHasher
@@ -23,10 +24,10 @@ def verify_pin(hash_: str, pin: str) -> bool:
         return False
 
 
-def create_access_token(user: dict, session_id: str) -> str:
+def create_access_token(user: dict[str, Any], session_id: str) -> str:
     from app.config import settings
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     payload = {
         "iss": ISSUER,
         "aud": AUDIENCE,
@@ -43,12 +44,15 @@ def create_access_token(user: dict, session_id: str) -> str:
     return jwt.encode(payload, settings.ACCESS_TOKEN_SECRET, algorithm="HS256")
 
 
-def decode_access_token(token: str) -> dict:
+def decode_access_token(token: str) -> dict[str, Any]:
     from app.config import settings
 
     return jwt.decode(
-        token, settings.ACCESS_TOKEN_SECRET, algorithms=["HS256"],
-        issuer=ISSUER, audience=AUDIENCE,
+        token,
+        settings.ACCESS_TOKEN_SECRET,
+        algorithms=["HS256"],
+        issuer=ISSUER,
+        audience=AUDIENCE,
     )
 
 

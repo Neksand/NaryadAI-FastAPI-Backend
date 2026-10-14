@@ -1,29 +1,66 @@
-import hashlib
 import json
 import uuid
+from datetime import datetime
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel, Field
-from typing import Literal
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.db import get_pool
-from app.deps import assert_can_read_order, get_current_user, require_role, run_idempotent
-from app.errors import forbidden, not_found, validation_error
+from app.deps import assert_can_read_order, get_current_user, run_idempotent
+from app.errors import forbidden, not_found
 from app.security import sha256_hex
 from app.storage import signed_url
 
 router = APIRouter()
 
 
+class ExportFilters(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    from_: datetime | None = Field(default=None, alias="from")
+    to: datetime | None = None
+    area_id: uuid.UUID | None = None
+    equipment_id: uuid.UUID | None = None
+    assignee_id: uuid.UUID | None = None
+    work_order_id: uuid.UUID | None = None
+    status: (
+        Literal[
+            "issued",
+            "accepted",
+            "queued",
+            "rejected",
+            "in_progress",
+            "paused",
+            "rework",
+            "done",
+            "ai_review",
+            "closed",
+            "cancelled",
+        ]
+        | None
+    ) = None
+    priority: Literal["critical", "high", "normal", "planned"] | None = None
+    kind: Literal["planned", "unplanned"] | None = None
+
+    @model_validator(mode="after")
+    def validate_period(self) -> "ExportFilters":
+        if self.from_ is not None and self.to is not None and self.from_ >= self.to:
+            raise ValueError("from must be earlier than to")
+        return self
+
+
 class ExportIn(BaseModel):
     type: Literal["orders", "shift", "ratings", "materials", "downtime", "dashboard"]
     format: Literal["pdf", "xlsx"]
-    filters: dict = Field(default_factory=dict)
+    filters: ExportFilters = Field(default_factory=ExportFilters)
     work_order_id: uuid.UUID | None = None
 
 
 @router.post("/reports/export", status_code=202)
-async def create_export(body: ExportIn, request: Request, user: dict = Depends(get_current_user)):
+async def create_export(
+    body: ExportIn, request: Request, user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, Any]:
     if user["role"] == "worker" and not (body.type == "orders" and body.work_order_id):
         raise forbidden("Исполнителю доступен только отчёт по наряду")
     if body.type == "orders" and body.work_order_id:
@@ -31,16 +68,36 @@ async def create_export(body: ExportIn, request: Request, user: dict = Depends(g
     elif user["role"] not in ("master", "manager", "admin"):
         raise forbidden()
     key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
-    h = sha256_hex(json.dumps({"body": body.model_dump(mode="json")}, sort_keys=True, default=str))
+    h = sha256_hex(
+        json.dumps(
+            {"body": body.model_dump(mode="json", by_alias=True)}, sort_keys=True, default=str
+        )
+    )
 
-    async def action(conn):
-        scope = {"user_id": user["id"], "role": user["role"], "area_ids": user["areaIds"], "crew_id": user["crewId"]}
+    async def action(conn: Any) -> dict[str, Any]:
+        scope = {
+            "user_id": user["id"],
+            "role": user["role"],
+            "area_ids": user["areaIds"],
+            "crew_id": user["crewId"],
+        }
+        filters = body.filters.model_dump(mode="json", by_alias=True, exclude_none=True)
+        if body.work_order_id:
+            filters["work_order_id"] = str(body.work_order_id)
         row = await conn.fetchrow(
             """INSERT INTO report_exports(requested_by, report_type, format, filters, scope)
                VALUES ($1::uuid,$2,$3,$4::jsonb,$5::jsonb) RETURNING id, state""",
-            user["id"], body.type, body.format, json.dumps({**body.filters, **({"work_order_id": str(body.work_order_id)} if body.work_order_id else {})}), json.dumps(scope))
-        await conn.execute("INSERT INTO outbox_events(event, channels, payload) VALUES ('report.export_requested',$1,$2::jsonb)",
-                           [f"user:{user['id']}"], json.dumps({"export_id": str(row["id"])}))
+            user["id"],
+            body.type,
+            body.format,
+            json.dumps(filters),
+            json.dumps(scope),
+        )
+        await conn.execute(
+            "INSERT INTO outbox_events(event, channels, payload) VALUES ('report.export_requested',$1,$2::jsonb)",
+            [f"user:{user['id']}"],
+            json.dumps({"export_id": str(row["id"])}),
+        )
         return {"statusCode": 202, "body": {"job_id": str(row["id"]), "status": row["state"]}}
 
     res = await run_idempotent(key, user["id"], h, action)
@@ -48,7 +105,9 @@ async def create_export(body: ExportIn, request: Request, user: dict = Depends(g
 
 
 @router.get("/reports/export/{job_id}")
-async def get_export(job_id: uuid.UUID, user: dict = Depends(get_current_user)):
+async def get_export(
+    job_id: uuid.UUID, user: dict[str, Any] = Depends(get_current_user)
+) -> dict[str, Any]:
     pool = await get_pool()
     row = await pool.fetchrow("SELECT * FROM report_exports WHERE id=$1::uuid", str(job_id))
     if not row or (str(row["requested_by"]) != user["id"] and user["role"] != "admin"):

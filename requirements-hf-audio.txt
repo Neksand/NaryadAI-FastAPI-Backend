@@ -1,0 +1,9 @@
+# Optional local Estimin3n multimodal runtime (kept out of the base API image).
+torch>=2.6
+transformers>=4.53.1,<5
+accelerate>=1.0
+timm>=1.0
+soundfile>=0.12
+librosa>=0.10
+safetensors>=0.4
+pillow>=10

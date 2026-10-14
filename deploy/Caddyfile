@@ -1,0 +1,22 @@
+# Caddy reverse proxy: PWA static + /api -> api:8000.
+# Usage: docker compose -f docker-compose.yml -f compose.web.yaml up -d --build
+{
+	admin off
+	http_port 80
+	https_port 443
+}
+
+:80 {
+	encode gzip
+	root * /srv/web
+	file_server
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy api:8080
+	}
+
+	handle {
+		try_files {path} /index.html
+	}
+}

@@ -1,0 +1,39 @@
+# Keep the Docker build context small and secret-free.
+.git
+.gitignore
+.github
+.idea
+.vscode
+
+# Local env / secrets
+.env
+.env.*
+!.env.example
+!.env.server.example
+
+# Python venv & caches
+.venv
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Local model weights
+.hf-cache
+
+# Build outputs & artifacts
+build
+dist
+*.egg-info
+*.whl
+
+# Tests, docs and non-runtime files
+tests
+docs
+deploy
+coverage.*
+htmlcov
+*.pdf
+.DS_Store

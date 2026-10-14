@@ -1,0 +1,10 @@
+# Cloudflare tunnel overlay (phone/demo access without open ports).
+# Usage: docker compose -f docker-compose.yml -f compose.web.yaml -f compose.tunnel.yaml up -d
+# Requires cloudflared token in ${CLOUDFLARED_TOKEN}.
+services:
+  tunnel:
+    image: cloudflare/cloudflared:2026.6.1
+    command: tunnel --no-autoupdate run --token ${CLOUDFLARED_TOKEN}
+    depends_on:
+      - web
+    restart: unless-stopped

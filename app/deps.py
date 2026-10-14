@@ -1,17 +1,19 @@
 import base64
 import json
 import uuid
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 from fastapi import Header, Request
 
 from app.db import get_pool
-from app.errors import AppError, conflict, forbidden, not_found, unauthorized, validation_error
-from app.security import decode_access_token, sha256_hex
+from app.errors import conflict, forbidden, not_found, unauthorized, validation_error
+from app.security import decode_access_token
 
 ROLES = ("worker", "master", "manager", "admin")
 
 
-async def get_current_user(request: Request) -> dict:
+async def get_current_user(request: Request) -> dict[str, Any]:
     auth = request.headers.get("authorization", "")
     token = None
     if auth.lower().startswith("bearer "):
@@ -22,16 +24,16 @@ async def get_current_user(request: Request) -> dict:
         raise unauthorized()
     try:
         claims = decode_access_token(token)
-    except Exception:
-        raise unauthorized()
+    except Exception as e:
+        raise unauthorized() from e
     sub, sid = claims.get("sub"), claims.get("sid")
     if not sub or not isinstance(sid, str):
         raise unauthorized()
     try:
         uuid.UUID(str(sub))
         uuid.UUID(str(sid))
-    except ValueError:
-        raise unauthorized()
+    except ValueError as e:
+        raise unauthorized() from e
     if claims.get("role") not in ROLES:
         raise unauthorized()
     pool = await get_pool()
@@ -46,7 +48,8 @@ async def get_current_user(request: Request) -> dict:
         raise unauthorized()
     sess = await pool.fetchrow(
         "SELECT id FROM refresh_sessions WHERE id = $1 AND employee_id = $2 AND revoked_at IS NULL AND expires_at > now()",
-        str(sid), str(sub),
+        str(sid),
+        str(sub),
     )
     if not sess:
         raise unauthorized()
@@ -63,22 +66,22 @@ async def get_current_user(request: Request) -> dict:
     }
 
 
-def require_role(user: dict, *roles: str) -> None:
+def require_role(user: dict[str, Any], *roles: str) -> None:
     if user["role"] not in roles:
         raise forbidden()
 
 
-def require_any_role(user: dict, *roles: str) -> None:
+def require_any_role(user: dict[str, Any], *roles: str) -> None:
     """Alias of require_role for the product contract (§6)."""
     require_role(user, *roles)
 
 
-async def require_work_order_access(user: dict, order_id: str) -> dict:
+async def require_work_order_access(user: dict[str, Any], order_id: str) -> dict[str, Any]:
     """Contract alias: assert access and return the order row."""
     return await assert_can_read_order(user, order_id)
 
 
-async def assert_can_read_order(user: dict, order_id: str) -> dict:
+async def assert_can_read_order(user: dict[str, Any], order_id: str) -> dict[str, Any]:
     pool = await get_pool()
     row = await pool.fetchrow("SELECT * FROM work_orders WHERE id = $1", order_id)
     if not row:
@@ -100,8 +103,8 @@ async def assert_can_read_order(user: dict, order_id: str) -> dict:
     raise forbidden()
 
 
-def allowed_actions(user: dict, order: dict) -> list[str]:
-    status = order.get("status")
+def allowed_actions(user: dict[str, Any], order: dict[str, Any]) -> list[str]:
+    status = str(order.get("status") or "")
     if user["role"] == "worker" and (
         str(order.get("assignee_id") or "") == user["id"]
         or (user["crewId"] and str(order.get("crew_id") or "") == user["crewId"])
@@ -124,22 +127,31 @@ def allowed_actions(user: dict, order: dict) -> list[str]:
     return []
 
 
-def decode_cursor(cursor: str | None) -> dict | None:
+def decode_cursor(cursor: str | None) -> dict[str, Any] | None:
     if not cursor:
         return None
     try:
         val = json.loads(base64.urlsafe_b64decode(cursor + "==").decode())
         uuid.UUID(str(val["id"]))
         return {"id": str(val["id"]), "issued_at": str(val["issued_at"])}
-    except Exception:
-        raise validation_error([{"path": "cursor", "message": "Некорректный курсор"}])
+    except Exception as e:
+        raise validation_error([{"path": "cursor", "message": "Некорректный курсор"}]) from e
 
 
 def encode_cursor(id_: str, issued_at: str) -> str:
-    return base64.urlsafe_b64encode(json.dumps({"id": id_, "issued_at": issued_at}).encode()).decode().rstrip("=")
+    return (
+        base64.urlsafe_b64encode(json.dumps({"id": id_, "issued_at": issued_at}).encode())
+        .decode()
+        .rstrip("=")
+    )
 
 
-async def run_idempotent(key: str | None, user_id: str, request_hash: str, action):
+async def run_idempotent(
+    key: str | None,
+    user_id: str,
+    request_hash: str,
+    action: Callable[[Any], Awaitable[dict[str, Any]]],
+) -> dict[str, Any]:
     """Port of src/common/idempotency.ts. Requires UUID key; replays stored response."""
     from app.db import get_pool
 
@@ -148,43 +160,70 @@ async def run_idempotent(key: str | None, user_id: str, request_hash: str, actio
     if key.startswith("auto-"):
         # No client key: run once without replay (contract-friendly DX).
         pool = await get_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                result = await action(conn)
-                return {"status_code": int(result["statusCode"]), "body": result["body"], "replayed": False}
+        async with pool.acquire() as conn, conn.transaction():
+            result = await action(conn)
+            return {
+                "status_code": int(result["statusCode"]),
+                "body": result["body"],
+                "replayed": False,
+            }
     try:
         uuid.UUID(key)
-    except ValueError:
-        raise validation_error([{"path": "Idempotency-Key", "message": "Укажите корректный Idempotency-Key в формате UUID"}])
+    except ValueError as e:
+        raise validation_error(
+            [
+                {
+                    "path": "Idempotency-Key",
+                    "message": "Укажите корректный Idempotency-Key в формате UUID",
+                }
+            ]
+        ) from e
     pool = await get_pool()
-    async with pool.acquire() as conn:
-        async with conn.transaction():
-            await conn.execute(
-                "INSERT INTO idempotency_keys(employee_id, key, request_hash) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
-                user_id, key, request_hash,
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute(
+            "INSERT INTO idempotency_keys(employee_id, key, request_hash) VALUES ($1,$2,$3) ON CONFLICT DO NOTHING",
+            user_id,
+            key,
+            request_hash,
+        )
+        row = await conn.fetchrow(
+            "SELECT * FROM idempotency_keys WHERE employee_id=$1 AND key=$2 FOR UPDATE",
+            user_id,
+            key,
+        )
+        assert row is not None
+        if row["request_hash"] != request_hash:
+            raise conflict(
+                "idempotency_key_reused",
+                "Этот Idempotency-Key уже использован для другого запроса",
             )
-            row = await conn.fetchrow(
-                "SELECT * FROM idempotency_keys WHERE employee_id=$1 AND key=$2 FOR UPDATE",
-                user_id, key,
-            )
-            assert row is not None
-            if row["request_hash"] != request_hash:
-                raise conflict("idempotency_key_reused", "Этот Idempotency-Key уже использован для другого запроса")
-            if row["response_status"] is not None:
-                import json as _json
-
-                body = _json.loads(row["response_body"]) if isinstance(row["response_body"], str) else row["response_body"]
-                return {"status_code": int(row["response_status"]), "body": body, "replayed": True}
-            # run action inside same txn: give it the connection
-            result = await action(conn)
+        if row["response_status"] is not None:
             import json as _json
 
-            await conn.execute(
-                "UPDATE idempotency_keys SET response_status=$2, response_body=$3::jsonb WHERE id=$1",
-                row["id"], int(result["statusCode"]), _json.dumps(result["body"]),
+            body = (
+                _json.loads(row["response_body"])
+                if isinstance(row["response_body"], str)
+                else row["response_body"]
             )
-            return {"status_code": int(result["statusCode"]), "body": result["body"], "replayed": False}
+            return {"status_code": int(row["response_status"]), "body": body, "replayed": True}
+        # run action inside same txn: give it the connection
+        result = await action(conn)
+        import json as _json
+
+        await conn.execute(
+            "UPDATE idempotency_keys SET response_status=$2, response_body=$3::jsonb WHERE id=$1",
+            row["id"],
+            int(result["statusCode"]),
+            _json.dumps(result["body"]),
+        )
+        return {
+            "status_code": int(result["statusCode"]),
+            "body": result["body"],
+            "replayed": False,
+        }
 
 
-def idempotency_key_from_header(idempotency_key: str | None = Header(default=None, alias="Idempotency-Key")) -> str | None:
+def idempotency_key_from_header(
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+) -> str | None:
     return idempotency_key

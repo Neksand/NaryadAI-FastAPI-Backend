@@ -1,0 +1,49 @@
+[project]
+name = "naryadai-backend"
+version = "0.1.0"
+description = "NaryadAI FastAPI backend"
+requires-python = ">=3.12"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["app*"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+[[tool.mypy.overrides]]
+module = ["boto3.*", "botocore.*", "asyncpg.*", "openpyxl.*", "soundfile"]
+ignore_missing_imports = true
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = [".venv", "__pycache__", ".hf-cache"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+ignore = [
+    "E402",
+    "E501", # debt: 160 long lines (line-length 100)
+    "B008", # FastAPI Depends/Query/File/Form idiom in defaults
+    "RUF001", # Cyrillic UI strings
+    "RUF002", # Cyrillic docstrings
+    "RUF003", # Cyrillic comments
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["SIM117", "SIM300", "RUF012", "RUF015", "RUF059", "B017"] # tests/ frozen
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"
