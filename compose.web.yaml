@@ -18,7 +18,9 @@ services:
 
   worker:
     build: .
-    env_file: ${APP_ENV_FILE:-.env}
+    env_file:
+      - path: ${APP_ENV_FILE:-.env}
+        required: false
     command: python -m app.services.background
     depends_on:
       postgres:

@@ -233,19 +233,27 @@ def test_notifications_persisted_in_app():
             },
         )
         assert r.status_code == 201, r.text
+        oid = r.json()["id"]
         import time
 
-        notes = []
+        # The deadline engine also emits other notification types for the seeded
+        # overdue orders, so wait for the assignment notification of *this* order
+        # instead of assuming it is the newest row.
+        assigned = []
         for _ in range(20):
             time.sleep(1)
             notes = c.get("/api/v1/notifications?unread_only=true", headers=wh).json()["data"]
-            if notes:
+            assigned = [
+                n
+                for n in notes
+                if n["type"] == "WORK_ORDER_ASSIGNED" and str(n.get("related_entity_id")) == oid
+            ]
+            if assigned:
                 break
-        assert notes, "no persistent notification for assignee"
-        assert notes[0]["type"] == "WORK_ORDER_ASSIGNED"
-        assert "наряд" in notes[0]["message"].lower() or "наряд" in notes[0]["title"].lower()
-        nid = notes[0]["id"]
-        assert c.post(f"/api/v1/notifications/{nid}/read", headers=wh).status_code == 200
+        assert assigned, "no persistent WORK_ORDER_ASSIGNED notification for this order"
+        note = assigned[0]
+        assert "наряд" in note["message"].lower() or "наряд" in note["title"].lower()
+        assert c.post(f"/api/v1/notifications/{note['id']}/read", headers=wh).status_code == 200
 
 
 def test_mock_ai_localized():

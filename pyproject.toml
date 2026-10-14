@@ -47,3 +47,7 @@ line-ending = "auto"
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+# Make the project importable regardless of how pytest is invoked
+# (`pytest` console script does not add the CWD to sys.path the way
+# `python -m pytest` does).
+pythonpath = ["."]
