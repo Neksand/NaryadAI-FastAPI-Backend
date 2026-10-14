@@ -143,6 +143,18 @@ def _pg_env() -> dict:
     }
 
 
+def _pg_tools() -> list[str]:
+    """Command prefix for pg_dump/psql.
+
+    A client older than the server makes pg_dump abort with "server version
+    mismatch": the ubuntu CI runner ships pg_dump 16 while compose runs
+    postgres 17 (locally the homebrew 17 client happens to match). Executing
+    the tools inside the postgres container uses binaries built for exactly
+    this server, so the backup/restore roundtrip is identical everywhere.
+    """
+    return ["docker", "compose", "exec", "-T", "postgres"]
+
+
 # --- migrations ---
 
 
@@ -615,11 +627,8 @@ def test_work_order_numbers_unique_after_seed(env):
 def test_backup_schema_dump_has_core_tables(env):
     pg = _pg_env()
     cmd = [
+        *_pg_tools(),
         "pg_dump",
-        "-h",
-        pg["host"],
-        "-p",
-        pg["port"],
         "-U",
         pg["user"],
         "-d",
@@ -634,8 +643,7 @@ def test_backup_schema_dump_has_core_tables(env):
         "-t",
         "schema_migrations",
     ]
-    environ = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "PGPASSWORD": pg["password"]}
-    p = subprocess.run(cmd, capture_output=True, text=True, timeout=120, env=environ)
+    p = subprocess.run(cmd, capture_output=True, text=True, timeout=120, cwd=REPO)
     assert p.returncode == 0, p.stderr
     for t in ("work_orders", "outbox_events", "idempotency_keys", "schema_migrations"):
         assert f"CREATE TABLE public.{t}" in p.stdout or f"CREATE TABLE {t}" in p.stdout, t
@@ -643,8 +651,7 @@ def test_backup_schema_dump_has_core_tables(env):
 
 def test_backup_restore_probe_roundtrip(env):
     pg = _pg_env()
-    base = ["-h", pg["host"], "-p", pg["port"], "-U", pg["user"], "-d", pg["dbname"]]
-    environ = {"PATH": "/opt/homebrew/bin:/usr/bin:/bin", "PGPASSWORD": pg["password"]}
+    base = ["-U", pg["user"], "-d", pg["dbname"]]
     probe = f"__backup_probe_{uuid.uuid4().hex[:8]}"
 
     async def setup():
@@ -657,11 +664,11 @@ def test_backup_restore_probe_roundtrip(env):
     _db(env["client"], setup)
     try:
         dump = subprocess.run(
-            ["pg_dump", *base, "-t", probe],
+            [*_pg_tools(), "pg_dump", *base, "-t", probe],
             capture_output=True,
             text=True,
             timeout=60,
-            env=environ,
+            cwd=REPO,
         )
         assert dump.returncode == 0, dump.stderr
         assert "COPY" in dump.stdout and "naryad" in dump.stdout
@@ -674,12 +681,12 @@ def test_backup_restore_probe_roundtrip(env):
 
         _db(env["client"], drop)
         restore = subprocess.run(
-            ["psql", *base, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
+            [*_pg_tools(), "psql", *base, "-v", "ON_ERROR_STOP=1", "-q", "-f", "-"],
             input=dump.stdout,
             capture_output=True,
             text=True,
             timeout=60,
-            env=environ,
+            cwd=REPO,
         )
         assert restore.returncode == 0, restore.stderr
 
