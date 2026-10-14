@@ -5,5 +5,8 @@ numpy>=1.26
 pytest-cov>=6,<8
 ruff>=0.11,<1
 mypy>=1.15,<2
+# `pip wheel --no-build-isolation` builds with the interpreter's own build
+# backend; python 3.12 images no longer ship setuptools.
+setuptools>=61
 httpx2>=2,<3
 moto[server]>=5,<6
