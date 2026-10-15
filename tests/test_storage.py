@@ -121,3 +121,44 @@ def test_upload_and_signed_url_use_bucket_key_and_security_metadata(monkeypatch)
         ("get_object",),
         {"Params": {"Bucket": "work-orders", "Key": "photos/order.jpg"}, "ExpiresIn": 180},
     )
+
+
+def test_put_bytes_retries_transient_network_failures(monkeypatch):
+    import botocore.exceptions
+
+    calls = []
+
+    class Flaky:
+        def put_object(self, **kw):
+            calls.append(kw)
+            if len(calls) < 3:
+                raise botocore.exceptions.EndpointConnectionError(endpoint_url="http://s3")
+            return {}
+
+    monkeypatch.setattr(storage, "get_s3", lambda: Flaky())
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    monkeypatch.setattr(settings, "S3_BUCKET", "work-orders")
+
+    storage.put_bytes("photos/order.jpg", b"jpeg", "image/jpeg")
+    assert len(calls) == 3
+
+
+def test_put_bytes_does_not_retry_client_errors(monkeypatch):
+    import botocore.exceptions
+
+    calls = []
+
+    class Forbidden:
+        def put_object(self, **kw):
+            calls.append(kw)
+            raise botocore.exceptions.ClientError(
+                {"Error": {"Code": "AccessDenied"}, "ResponseMetadata": {"HTTPStatusCode": 403}},
+                "PutObject",
+            )
+
+    monkeypatch.setattr(storage, "get_s3", lambda: Forbidden())
+    monkeypatch.setattr(settings, "S3_BUCKET", "work-orders")
+
+    with pytest.raises(botocore.exceptions.ClientError):
+        storage.put_bytes("photos/order.jpg", b"jpeg", "image/jpeg")
+    assert len(calls) == 1
