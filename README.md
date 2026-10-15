@@ -1,5 +1,7 @@
 # НарядAI — сердце системы: API, realtime и искусственный интеллект
 
+**Доказательства:** [EVIDENCE](docs/EVIDENCE.md) · [TEST_REPORT](TEST_REPORT.md) · [IMPLEMENTATION_REPORT](IMPLEMENTATION_REPORT.md)
+
 Проверенный срез от 14.10.2026: [отчёт о тестах](TEST_REPORT.md), [изменения](IMPLEMENTATION_REPORT.md), [запуск](DEPLOYMENT.md), [демо](DEMO_SCRIPT.md), [требования](CASE_REQUIREMENTS_MATRIX.md). Старые отчёты в docs относятся к прежним коммитам; их метрики не подтверждают этот срез.
 
 Backend НарядAI предоставляет API нарядов, сотрудников, фотографий, уведомлений и аналитики. Переходы проходят серверную проверку и сохраняются с автором и временем; AI-приёмка формирует рекомендацию для мастера. Состояние готовности и границы проверки зафиксированы в отчётах выше.
@@ -142,3 +144,7 @@ APP_ENV_FILE=.env.server docker compose --env-file .env.server up --build -d
 Серверный API разрешает origin упакованного Tauri-клиента (`tauri://localhost`, `http://tauri.localhost` и `https://tauri.localhost`) и адрес фронтенда из `CORS_ORIGINS`. После обновления backend пересоберите и перезапустите API на сервере: уже запущенный удалённый API сам эти изменения не получит.
 
 Внешние модели на сервере выбраны явно: Gemini для текста/фото и Groq Whisper для аудио. Экономические расчёты выполняются обычным Python-кодом по введённым ставкам и ценам; LLM не подменяет арифметику. Без заполненных API ключей проект сохранит локальные правила/эвристики, но внешнее распознавание и мультимодальная проверка будут недоступны.
+
+## Артефакты доказательств
+
+[EVIDENCE](docs/EVIDENCE.md) · [TEST_REPORT](TEST_REPORT.md) · [IMPLEMENTATION_REPORT](IMPLEMENTATION_REPORT.md)

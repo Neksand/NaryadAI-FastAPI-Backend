@@ -151,10 +151,121 @@ async def _notify_for_event(
     return ws_type, rows
 
 
+AI_REVIEW_TIMEOUT_SECONDS = 120.0
+AI_REVIEW_MAX_ATTEMPTS = 5
+
+OUTBOX_IDLE_POLL_SECONDS = 0.5
+OUTBOX_ERROR_POLL_SECONDS = 1.0
+OUTBOX_FAILURE_COOLDOWN_SECONDS = 0.2
+
+
+async def _claim_outbox_event(conn: Any) -> Any:
+    """Первая транзакция: пометить событие locked и ЗАКОММИТИТЬ.
+
+    Claim отделён от обработки: падение обработки не откатывает claim,
+    attempts растёт во второй транзакции, лок строки не висит.
+    """
+    async with conn.transaction():
+        return await conn.fetchrow(
+            """UPDATE outbox_events SET locked_until=now()+interval '30 seconds'
+               WHERE id=(SELECT id FROM outbox_events WHERE published_at IS NULL
+               AND (locked_until IS NULL OR locked_until < now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
+               RETURNING *"""
+        )
+
+
+async def _mark_outbox_published(conn: Any, event_id: Any) -> None:
+    """Вторая транзакция (успех): событие обработано."""
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE outbox_events SET published_at=now(), locked_until=NULL WHERE id=$1",
+            event_id,
+        )
+
+
+def _claimed_attempts(row: Any) -> int:
+    try:
+        value = row.get("attempts", 0) if hasattr(row, "get") else row["attempts"]
+    except Exception:
+        return 0
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+async def _fail_outbox_event(conn: Any, row: Any, error: BaseException | str) -> int:
+    """Вторая транзакция (ошибка): attempts растёт, лок снимается.
+
+    Возвращает новое число попыток. Никогда не откатывает claim:
+    выполняется отдельно от транзакции обработки.
+    """
+    text = error if isinstance(error, str) else (str(error)[:500] or type(error).__name__)
+    failed_attempts = _claimed_attempts(row) + 1
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE outbox_events SET locked_until=NULL, last_error=$2, attempts=attempts+1 WHERE id=$1",
+            row["id"],
+            text,
+        )
+    await asyncio.sleep(OUTBOX_FAILURE_COOLDOWN_SECONDS)
+    return failed_attempts
+
+
+async def _dead_letter_after_retries(
+    conn: Any, row: Any, work_order_id: str | None, error_text: str, failed_attempts: int
+) -> None:
+    """Dead-letter: после N попыток — fallback-ревью, событие помечается обработанным.
+
+    Мастер никогда не висит без ревью: fallback-строка needs_master_review
+    разблокирует закрытие через override.
+    """
+    from app.services.ai_review import write_dead_letter_review
+
+    if failed_attempts < AI_REVIEW_MAX_ATTEMPTS or not work_order_id:
+        return
+    try:
+        async with conn.transaction():
+            await write_dead_letter_review(conn, work_order_id, error_text)
+    except Exception:
+        # Fallback не удался — событие остаётся retryable, следующая попытка повторит.
+        return
+    async with conn.transaction():
+        await conn.execute(
+            "UPDATE outbox_events SET published_at=now(), locked_until=NULL, last_error=$2 WHERE id=$1",
+            row["id"],
+            f"dead_letter_after_{failed_attempts}_attempts: {error_text}"[:500],
+        )
+
+
+async def _handle_ai_review_event(conn: Any, row: Any) -> None:
+    """Обработка ai.review_requested вне claim-транзакции, с таймаутом."""
+    from app.services.ai_review import run_ai_review
+
+    work_order_id: str | None = None
+    try:
+        payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+        work_order_id = str(payload.get("work_order_id"))
+        async with conn.transaction():
+            await asyncio.wait_for(
+                run_ai_review(conn, work_order_id),
+                timeout=AI_REVIEW_TIMEOUT_SECONDS,
+            )
+    except TimeoutError as e:
+        error_text = str(e)[:500] or (f"ai_review timed out after {AI_REVIEW_TIMEOUT_SECONDS:g}s")
+        failed_attempts = await _fail_outbox_event(conn, row, error_text)
+        await _dead_letter_after_retries(conn, row, work_order_id, error_text, failed_attempts)
+    except Exception as e:
+        error_text = str(e)[:500] or type(e).__name__
+        failed_attempts = await _fail_outbox_event(conn, row, error_text)
+        await _dead_letter_after_retries(conn, row, work_order_id, error_text, failed_attempts)
+    else:
+        await _mark_outbox_published(conn, row["id"])
+
+
 async def outbox_loop() -> None:
     from app.config import settings
     from app.db import get_pool
-    from app.services.ai_review import run_ai_review
     from app.services.reports import process_export
 
     redis = aioredis.from_url(settings.REDIS_URL)
@@ -162,33 +273,28 @@ async def outbox_loop() -> None:
     while True:
         try:
             pool = await get_pool()
-            async with pool.acquire() as conn, conn.transaction():
-                row = await conn.fetchrow(
-                    """UPDATE outbox_events SET locked_until=now()+interval '30 seconds', attempts=attempts+1
-                       WHERE id=(SELECT id FROM outbox_events WHERE published_at IS NULL
-                       AND (locked_until IS NULL OR locked_until < now()) ORDER BY created_at FOR UPDATE SKIP LOCKED LIMIT 1)
-                       RETURNING *"""
-                )
+            async with pool.acquire() as conn:
+                row = await _claim_outbox_event(conn)
                 if not row:
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(OUTBOX_IDLE_POLL_SECONDS)
                     continue
                 event = row["event"]
-                try:
-                    if event == "ai.review_requested":
-                        payload = (
-                            row["payload"]
-                            if isinstance(row["payload"], dict)
-                            else json.loads(row["payload"])
-                        )
-                        await run_ai_review(conn, str(payload.get("work_order_id")))
-                    elif event == "report.export_requested":
+                if event == "ai.review_requested":
+                    await _handle_ai_review_event(conn, row)
+                elif event == "report.export_requested":
+                    try:
                         payload = (
                             row["payload"]
                             if isinstance(row["payload"], dict)
                             else json.loads(row["payload"])
                         )
                         await process_export(conn, str(payload.get("export_id")))
+                    except Exception as e:
+                        await _fail_outbox_event(conn, row, e)
                     else:
+                        await _mark_outbox_published(conn, row["id"])
+                else:
+                    try:
                         seq = await redis.incr(seq_key)
                         channels = list(row["channels"] or [])
                         payload = (
@@ -209,19 +315,12 @@ async def outbox_loop() -> None:
                             ),
                         )
                         await _notify_for_event(conn, event, payload, channels)
-                    await conn.execute(
-                        "UPDATE outbox_events SET published_at=now(), locked_until=NULL WHERE id=$1",
-                        row["id"],
-                    )
-                except Exception as e:
-                    await conn.execute(
-                        "UPDATE outbox_events SET locked_until=NULL, last_error=$2 WHERE id=$1",
-                        row["id"],
-                        str(e)[:500],
-                    )
-                    await asyncio.sleep(0.2)
+                    except Exception as e:
+                        await _fail_outbox_event(conn, row, e)
+                    else:
+                        await _mark_outbox_published(conn, row["id"])
         except Exception:
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(OUTBOX_ERROR_POLL_SECONDS)
 
 
 async def insights_loop() -> None:

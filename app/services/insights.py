@@ -8,10 +8,31 @@ Detectors (30-day window, Russian headlines + recommendations):
   unplanned_growth  — unplanned count last 30d >= 2x previous 30d per equipment
   downtime_top      — equipment with largest total stoppage
 Run on demand (POST /analytics/insights/generate) and every 6h in background.
+
+Every finding also stores evidence links: `order_ids` (uuids of the work orders
+that entered the sample), `denominator` (sample size) and `formula` (an honest
+description of the rule that fired — never a calibrated failure probability).
 """
 
 import json
 from typing import Any
+
+
+def _sample_ids(row: Any, key: str = "ids") -> list[str]:
+    """Collectors tolerate rows without the key (unit-test doubles)."""
+    try:
+        vals = row[key]
+    except (KeyError, IndexError, TypeError):
+        return []
+    return [str(v) for v in (vals or [])]
+
+
+def _single_id(row: Any, key: str = "order_id") -> str | None:
+    try:
+        val = row[key]
+    except (KeyError, IndexError, TypeError):
+        return None
+    return str(val) if val is not None else None
 
 
 async def generate_insights(conn: Any) -> list[str]:
@@ -27,13 +48,16 @@ async def generate_insights(conn: Any) -> list[str]:
         conf: float,
         headline_kk: str | None = None,
         recommendation_kk: str | None = None,
+        order_ids: list[str] | None = None,
+        denominator: int | None = None,
+        formula: str | None = None,
     ) -> None:
         exists = await conn.fetchval("SELECT 1 FROM insights WHERE headline=$1", headline)
         if exists:
             return
         await conn.execute(
-            """INSERT INTO insights(type,severity,scope,period_from,period_to,headline,headline_kk,evidence,recommendation,recommendation_kk,confidence)
-               VALUES ($1,$2,$3::jsonb,current_date-30,current_date,$4,$5,$6::jsonb,$7,$8,$9)""",
+            """INSERT INTO insights(type,severity,scope,period_from,period_to,headline,headline_kk,evidence,recommendation,recommendation_kk,confidence,order_ids,denominator,formula)
+               VALUES ($1,$2,$3::jsonb,current_date-30,current_date,$4,$5,$6::jsonb,$7,$8,$9,$10::uuid[],$11,$12)""",
             typ,
             sev,
             json.dumps(scope),
@@ -43,6 +67,9 @@ async def generate_insights(conn: Any) -> list[str]:
             rec,
             recommendation_kk,
             conf,
+            order_ids or [],
+            denominator,
+            formula,
         )
         created.append(headline)
 
@@ -51,7 +78,8 @@ async def generate_insights(conn: Any) -> list[str]:
         """SELECT w.equipment_id, e.name AS eq_name, e.name_kk AS eq_name_kk, a.name AS area_name, w.fault_code_id, f.code,
                   count(*)::int AS n,
                   (SELECT count(*) FROM work_orders x WHERE x.equipment_id=w.equipment_id
-                    AND x.issued_at >= now()-interval '30 days')::int AS total
+                    AND x.issued_at >= now()-interval '30 days')::int AS total,
+                  array_agg(w.id) AS ids
            FROM work_orders w JOIN equipment e ON e.id=w.equipment_id
            JOIN areas a ON a.id=w.area_id JOIN fault_codes f ON f.id=w.fault_code_id
            WHERE w.issued_at >= now()-interval '30 days' AND w.kind='unplanned'
@@ -61,6 +89,7 @@ async def generate_insights(conn: Any) -> list[str]:
     for r in rows:
         if r["total"] and r["n"] / r["total"] >= 0.5:
             eq, eq_kk = r["eq_name"], r["eq_name_kk"] or r["eq_name"]
+            ids = _sample_ids(r)
             await add(
                 "repeat_failure",
                 "critical",
@@ -71,6 +100,9 @@ async def generate_insights(conn: Any) -> list[str]:
                 0.85,
                 f"{eq_kk}: {r['code']} шифры бойынша қайта ақаулар ({r['n']}, 30 күнде)",
                 f"Жөндеу себебін жоймайды. {eq_kk} кезектен тыс диагностикасын және ЖЖЖ жоспарына енгізуді ұсынамыз.",
+                order_ids=ids,
+                denominator=r["total"],
+                formula="share = repeat_count / equipment_orders_30d; rule: repeat_count >= 4 AND share >= 0.50",
             )
 
     # 2. post_ppr_failure
@@ -83,29 +115,34 @@ async def generate_insights(conn: Any) -> list[str]:
                          AND p.done_at >= u.issued_at - interval '14 days')
            LIMIT 20"""
     )
-    seen = set()
+    by_equipment: dict[str, dict[str, Any]] = {}
     for r in rows:
         key = str(r["equipment_id"])
-        if key in seen:
-            continue
-        seen.add(key)
+        slot = by_equipment.setdefault(key, {"row": r, "ids": []})
+        slot["ids"].append(str(r["id"]))
+    for key, slot in by_equipment.items():
+        r = slot["row"]
+        ids = slot["ids"]
         eq, eq_kk = r["eq_name"], r["eq_name_kk"] or r["eq_name"]
         await add(
             "post_ppr_failure",
             "warning",
             {"equipment_id": key},
             f"{eq}: внеплановые работы вскоре после ППР",
-            [{"metric": "post_ppr_case", "order_id": str(r["id"])}],
+            [{"metric": "post_ppr_case", "order_id": ids[0]}],
             "Проверьте качество планового ремонта и назначьте контрольный осмотр через 10 дней.",
             0.74,
             f"{eq_kk}: ЖЖЖ-дан кейін көп ұзамай жоспардан тыс жұмыстар",
             "Жоспарлы жөндеу сапасын тексеріп, 10 күннен кейін бақылау тексеруін тағайындаңыз.",
+            order_ids=ids,
+            denominator=len(ids),
+            formula="unplanned.issued_at - planned.done_at <= 14 days AND planned.status = 'closed' (same equipment, 30d window)",
         )
 
     # 3. material_anomaly
     rows = await conn.fetch(
         """SELECT m.name, m.name_kk AS mat_name_kk, mw.quantity::float AS qty, m.typical_usage_per_order::float AS typ,
-                  e.name AS eq_name, e.name_kk AS eq_name_kk, w.equipment_id
+                  e.name AS eq_name, e.name_kk AS eq_name_kk, w.equipment_id, w.id AS order_id
            FROM material_writeoffs mw JOIN materials m ON m.id=mw.material_id
            JOIN work_orders w ON w.id=mw.work_order_id JOIN equipment e ON e.id=w.equipment_id
            WHERE m.typical_usage_per_order IS NOT NULL AND mw.quantity > 2*m.typical_usage_per_order
@@ -114,6 +151,7 @@ async def generate_insights(conn: Any) -> list[str]:
     for r in rows:
         eq, eq_kk = r["eq_name"], r["eq_name_kk"] or r["eq_name"]
         mat, mat_kk = r["name"], r["mat_name_kk"] or r["name"]
+        oid = _single_id(r)
         await add(
             "material_anomaly",
             "warning",
@@ -124,18 +162,23 @@ async def generate_insights(conn: Any) -> list[str]:
             0.78,
             f"{eq_kk}: «{mat_kk}» артық шығыны ({r['qty']}, норма {r['typ']})",
             "Ағуларды/есептен шығару нормаларын тексеріп, шығынды наряд пікірінде негіздеңіз.",
+            order_ids=[oid] if oid else [],
+            denominator=1,
+            formula="ratio = writeoff_qty / typical_usage_per_order; rule: ratio > 2.0 (single write-off)",
         )
 
     # 4. shift_correlation
     rows = await conn.fetch(
         """SELECT COALESCE(assignee.shift,'?') AS shift, count(*)::int AS n,
-                  (SELECT count(*)::int FROM work_orders WHERE kind='unplanned' AND issued_at >= now()-interval '30 days') AS total
+                  (SELECT count(*)::int FROM work_orders WHERE kind='unplanned' AND issued_at >= now()-interval '30 days') AS total,
+                  array_agg(w.id) AS ids
            FROM work_orders w LEFT JOIN employees assignee ON assignee.id=w.assignee_id
            WHERE w.kind='unplanned' AND w.issued_at >= now()-interval '30 days'
            GROUP BY assignee.shift HAVING count(*) >= 6"""
     )
     for r in rows:
         if r["total"] and r["n"] / r["total"] >= 0.6:
+            ids = _sample_ids(r)
             await add(
                 "shift_correlation",
                 "info",
@@ -146,13 +189,17 @@ async def generate_insights(conn: Any) -> list[str]:
                 0.58,
                 f"Ақаулар «{r['shift']}» ауысымына шоғырланған ({r['total']}-дан {r['n']}, 30 күнде)",
                 "Бұл ауысымның жүктемесін мен құрамын тексеріп, регламентпен салыстырыңыз.",
+                order_ids=ids,
+                denominator=r["total"],
+                formula="share = shift_unplanned / unplanned_30d; rule: shift_unplanned >= 6 AND share >= 0.60",
             )
 
     # 5. unplanned_growth
     rows = await conn.fetch(
         """SELECT w.equipment_id, e.name AS eq_name, e.name_kk AS eq_name_kk,
                   count(*) FILTER (WHERE w.issued_at >= now()-interval '30 days')::int AS cur,
-                  count(*) FILTER (WHERE w.issued_at >= now()-interval '60 days' AND w.issued_at < now()-interval '30 days')::int AS prev
+                  count(*) FILTER (WHERE w.issued_at >= now()-interval '60 days' AND w.issued_at < now()-interval '30 days')::int AS prev,
+                  array_agg(w.id) FILTER (WHERE w.issued_at >= now()-interval '30 days') AS ids
            FROM work_orders w JOIN equipment e ON e.id=w.equipment_id
            WHERE w.kind='unplanned' AND w.issued_at >= now()-interval '60 days'
            GROUP BY w.equipment_id, e.name, e.name_kk HAVING count(*) FILTER (WHERE w.issued_at >= now()-interval '30 days') >= 4"""
@@ -160,6 +207,7 @@ async def generate_insights(conn: Any) -> list[str]:
     for r in rows:
         if r["prev"] and r["cur"] >= 2 * r["prev"]:
             eq, eq_kk = r["eq_name"], r["eq_name_kk"] or r["eq_name"]
+            ids = _sample_ids(r)
             await add(
                 "failure_forecast",
                 "warning",
@@ -170,12 +218,16 @@ async def generate_insights(conn: Any) -> list[str]:
                 0.66,
                 f"{eq_kk}: жоспардан тыс жұмыстардың өсуі {r['prev']} → {r['cur']} (айда)",
                 "Алдағы 2 аптада ақау болуы мүмкін — диагностика жоспарлаңыз.",
+                order_ids=ids,
+                denominator=r["cur"] + r["prev"],
+                formula="growth = cur_30d / prev_30d; rule: cur_30d >= 4 AND cur_30d >= 2 * prev_30d",
             )
 
     # 6. downtime_top
     rows = await conn.fetch(
         """SELECT w.equipment_id, e.name AS eq_name, e.name_kk AS eq_name_kk,
-                  sum(EXTRACT(EPOCH FROM (COALESCE(w.equipment_restored_at, now()) - w.equipment_stopped_at))/3600)::float AS hours
+                  sum(EXTRACT(EPOCH FROM (COALESCE(w.equipment_restored_at, now()) - w.equipment_stopped_at))/3600)::float AS hours,
+                  count(*)::int AS n, array_agg(w.id) AS ids
            FROM work_orders w JOIN equipment e ON e.id=w.equipment_id
            WHERE w.equipment_stopped_at IS NOT NULL AND w.issued_at >= now()-interval '30 days'
            GROUP BY w.equipment_id, e.name, e.name_kk ORDER BY hours DESC LIMIT 3"""
@@ -183,6 +235,7 @@ async def generate_insights(conn: Any) -> list[str]:
     for r in rows:
         if (r["hours"] or 0) >= 4:
             eq, eq_kk = r["eq_name"], r["eq_name_kk"] or r["eq_name"]
+            ids = _sample_ids(r)
             await add(
                 "material_anomaly",
                 "info",
@@ -193,11 +246,15 @@ async def generate_insights(conn: Any) -> list[str]:
                 0.6,
                 f"{eq_kk}: 30 күнде тоқтау {round(r['hours'], 1)} сағ — ұзақтығы бойынша алғашқы үштікте",
                 "Шифрлар бойынша тоқтау себептерін талдап, торапты ЖЖЖ жоспарына енгізіңіз.",
+                order_ids=ids,
+                denominator=(dict(r).get("n") or len(ids) or 1),
+                formula="downtime_hours = sum(restored_at - stopped_at) per equipment over 30d; rule: top-3 AND hours >= 4",
             )
     # 7. executor_pattern via z-score on durations (baseline = previous 60-30d)
     rows = await conn.fetch(
         """WITH cur AS (
-             SELECT assignee_id, AVG(EXTRACT(EPOCH FROM (done_at-started_at))/60)::float AS avg_min, count(*)::int AS n
+             SELECT assignee_id, AVG(EXTRACT(EPOCH FROM (done_at-started_at))/60)::float AS avg_min, count(*)::int AS n,
+                    array_agg(id) AS ids
              FROM work_orders WHERE assignee_id IS NOT NULL AND done_at IS NOT NULL AND started_at IS NOT NULL
                AND issued_at >= now()-interval '30 days' GROUP BY assignee_id HAVING count(*) >= 4),
            base AS (
@@ -206,7 +263,7 @@ async def generate_insights(conn: Any) -> list[str]:
              FROM work_orders WHERE assignee_id IS NOT NULL AND done_at IS NOT NULL AND started_at IS NOT NULL
                AND issued_at >= now()-interval '90 days' AND issued_at < now()-interval '30 days'
              GROUP BY assignee_id)
-           SELECT c.assignee_id, e.full_name, c.avg_min AS cur_min, b.avg_min AS base_min, b.sd, c.n
+           SELECT c.assignee_id, e.full_name, c.avg_min AS cur_min, b.avg_min AS base_min, b.sd, c.n, c.ids
            FROM cur c JOIN base b ON b.assignee_id=c.assignee_id JOIN employees e ON e.id=c.assignee_id"""
     )
     for r in rows:
@@ -214,6 +271,7 @@ async def generate_insights(conn: Any) -> list[str]:
         z = ((r["cur_min"] or 0) - (r["base_min"] or 0)) / denom
         if z >= 2.0:
             pct = round(((r["cur_min"] or 0) / (r["base_min"] or 1) - 1) * 100)
+            ids = _sample_ids(r)
             await add(
                 "executor_pattern",
                 "warning",
@@ -230,5 +288,8 @@ async def generate_insights(conn: Any) -> list[str]:
                 0.62,
                 f"{r['full_name']}: орташа уақыт {round(r['cur_min'])} мин, базалық {round(r['base_min'] or 0)} (+{pct}%, z={round(z, 1)})",
                 "Баяулау себептерін талдаңыз: кезек, жабдық немесе өткізілген қадамдар.",
+                order_ids=ids,
+                denominator=r["n"],
+                formula="z = (cur_avg_min - base_avg_min) / sd_floor; rule: z >= 2.0 AND n >= 4; sd_floor = sd if sd > 0 else max(base*0.2, 1)",
             )
     return created

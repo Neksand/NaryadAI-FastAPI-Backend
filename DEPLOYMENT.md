@@ -105,3 +105,20 @@ docker compose --env-file .env.production -f compose.production.yaml exec -T pos
 Для обновления: review миграций → backup → сборка новых образов → согласованное окно изменения → `up -d --build --wait` → smoke. Если новая схема совместима, откатить предыдущие image IDs и frontend. При несовместимой схеме не запускать автоматический down-migration: восстановить проверенный snapshot в новую БД и переключить приложение по отдельному плану. `down -v`, `dropdb` и перезапись production здесь не предлагаются.
 
 Production Dockerfile использует `requirements.lock`: 45 зафиксированных runtime-пакетов, dry-run установки и аудит выполнены. Базовые Docker tags пока плавающие; зафиксируйте проверенные image digests на целевой Linux-платформе. Контейнерная сборка, Linux smoke и TLS остаются release gate.
+
+## Локальные модели через Ollama (compose.ollama.yaml)
+
+Отдельный профиль `compose.ollama.yaml` поднимает только сервер Ollama
+(`127.0.0.1:11434`, volume `ollama_data`, healthcheck `ollama list`):
+
+```sh
+docker compose -f compose.ollama.yaml up -d
+docker compose -f compose.ollama.yaml exec ollama ollama pull llama3.1:8b
+```
+
+Пример переключателя — переменные окружения `OLLAMA_HOST` и `OLLAMA_MODEL`
+(см. environment сервиса). Локальные модели требуют GPU/железа заказчика;
+качество распознавания и приёмки этим профилем не заявляется и не измерено.
+Провайдерной обвязки Ollama в коде API нет: подключение — отдельная задача,
+текущий fallback остаётся «локальные правила». Не объединять этот файл
+с dev-compose и `compose.production.yaml`.

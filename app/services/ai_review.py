@@ -348,3 +348,64 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
         json.dumps({"id": work_order_id, "verdict": verdict}),
     )
     return {"verdict": verdict, "score": score, "attempt": int(attempt)}
+
+
+DEAD_LETTER_MODEL = "rules-v1-fallback"
+
+
+def dead_letter_explanation(reason: str) -> str:
+    detail = f" Причина: {reason}." if reason else ""
+    return (
+        "Проверка rules-v1 недоступна: автоматический разбор не выполнен — "
+        "внешний провайдер ИИ не ответил или завершился ошибкой."
+        f"{detail} Требуется обязательная проверка мастером."
+    )
+
+
+async def write_dead_letter_review(
+    conn: Any, work_order_id: str, reason: str = ""
+) -> dict[str, Any]:
+    """Fallback-строка needs_master_review, чтобы мастер не ждал ревью вечно.
+
+    Идемпотентна: если ревью по наряду уже есть, новую строку не создаём —
+    достаточно существующей для закрытия через override.
+    """
+    existing = await conn.fetchrow(
+        "SELECT verdict, attempt FROM ai_reviews WHERE work_order_id=$1::uuid"
+        " ORDER BY attempt DESC LIMIT 1",
+        work_order_id,
+    )
+    if existing:
+        return {
+            "verdict": existing["verdict"],
+            "attempt": int(existing["attempt"]),
+            "dead_letter": False,
+        }
+    attempt = await conn.fetchval(
+        "SELECT COALESCE(max(attempt),0)+1 FROM ai_reviews WHERE work_order_id=$1::uuid",
+        work_order_id,
+    )
+    explanation = dead_letter_explanation(reason)
+    checks = {"dead_letter": True, "reason": reason or "ai_unavailable"}
+    input_hash = hashlib.sha256(f"dead-letter:{work_order_id}".encode()).hexdigest()
+    await conn.execute(
+        """INSERT INTO ai_reviews(work_order_id, attempt, verdict, score, photo_score, confidence, checks, explanation, model, input_hash)
+           VALUES ($1::uuid,$2,'needs_master_review',NULL,NULL,0.0,$3::jsonb,$4,$5,$6)""",
+        work_order_id,
+        int(attempt),
+        json.dumps(checks),
+        explanation,
+        DEAD_LETTER_MODEL,
+        input_hash,
+    )
+    await conn.execute(
+        "INSERT INTO work_order_events(work_order_id, actor_kind, action, payload) VALUES ($1::uuid,'ai','ai_review_done',$2::jsonb)",
+        work_order_id,
+        json.dumps({"verdict": "needs_master_review", "dead_letter": True}),
+    )
+    await conn.execute(
+        "INSERT INTO outbox_events(event, channels, payload) VALUES ('order.ai_review_ready',$1,$2::jsonb)",
+        ["shift:current", f"order:{work_order_id}"],
+        json.dumps({"id": work_order_id, "verdict": "needs_master_review"}),
+    )
+    return {"verdict": "needs_master_review", "attempt": int(attempt), "dead_letter": True}

@@ -1,0 +1,27 @@
+# Локальный профиль LLM: сервер Ollama для экспериментов с моделями.
+# Отдельный файл: не объединять с dev-compose и compose.production.yaml.
+# Требует GPU/железо заказчика; качество распознавания НЕ заявляется.
+# Провайдерной обвязки Ollama в коде API нет — ниже только пример переключателя.
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    ports:
+      - "127.0.0.1:${LOCAL_OLLAMA_PORT:-11434}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Пример env-переключателя провайдера (значения по умолчанию — заглушки):
+    # OLLAMA_HOST=http://ollama:11434, OLLAMA_MODEL=llama3.1:8b.
+    # Подключение API к этому серверу в коде не реализовано.
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-llama3.1:8b}
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    restart: unless-stopped
+
+volumes:
+  ollama_data:

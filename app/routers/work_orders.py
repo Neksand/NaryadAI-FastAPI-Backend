@@ -127,6 +127,7 @@ class TransitionIn(BaseModel):
         "cancel",
         "change_priority",
     ]
+    expected_version: int | None = Field(default=None, ge=1)
     decision: Literal["agree_ai", "override"] | None = None
     score: int | None = Field(default=None, ge=0, le=100)
     reason_code: str | None = None
@@ -148,6 +149,7 @@ class PatchWO(BaseModel):
     priority: Literal["critical", "high", "normal", "planned"] | None = None
     due_at: AwareDatetime | None = None
     comment: str | None = Field(default=None, max_length=4000)
+    expected_version: int | None = Field(default=None, ge=1)
 
     @field_validator("comment", mode="before")
     @classmethod
@@ -159,6 +161,7 @@ class ReviewDecision(BaseModel):
     decision: Literal["agree_ai", "override"]
     score: int | None = Field(default=None, ge=0, le=100)
     comment: str | None = Field(default=None, max_length=4000)
+    expected_version: int | None = Field(default=None, ge=1)
 
     @field_validator("comment", mode="before")
     @classmethod
@@ -379,7 +382,7 @@ async def list_orders(
         )
     params.append(limit + 1)
     sql = f"""SELECT w.id, w.number, w.issued_at, w.kind, w.description, w.area_id, w.equipment_id, w.assignee_id, w.crew_id,
-              w.priority, w.due_at, w.status, w.norm_minutes, w.done_at, w.closed_at,
+              w.priority, w.due_at, w.status, w.norm_minutes, w.done_at, w.closed_at, w.version,
               (w.due_at < now() AND w.status NOT IN ('done','ai_review','closed','rejected','cancelled')) AS is_overdue
               FROM work_orders w {"WHERE " + " AND ".join(where) if where else ""}
               ORDER BY w.issued_at DESC, w.id DESC LIMIT ${len(params)}"""
@@ -628,12 +631,23 @@ async def patch_order(
             raise not_found("Наряд не найден")
         if str(cur["area_id"]) not in user["areaIds"]:
             raise not_found("Наряд не найден")
+        cur_version = int(dict(cur).get("version") or 1)
+        if body.expected_version is not None and cur_version != body.expected_version:
+            raise conflict(
+                "version_conflict",
+                "Наряд изменён. Обновите данные и повторите",
+                {
+                    "expected_version": body.expected_version,
+                    "current_version": cur_version,
+                    "version": cur_version,
+                },
+            )
         if cur["status"] in TERMINAL_DONE:
             raise conflict("invalid_transition", "Нельзя редактировать завершённый наряд")
         if body.due_at and body.due_at <= datetime.now(UTC):
             raise validation_error([{"path": "due_at", "message": "Срок должен быть в будущем"}])
         await conn.execute(
-            "UPDATE work_orders SET priority=COALESCE($2,priority), due_at=COALESCE($3,due_at), comment=COALESCE($4,comment), updated_at=now() WHERE id=$1::uuid",
+            "UPDATE work_orders SET priority=COALESCE($2,priority), due_at=COALESCE($3,due_at), comment=COALESCE($4,comment), version=version+1, updated_at=now() WHERE id=$1::uuid",
             str(order_id),
             body.priority,
             body.due_at,
@@ -646,7 +660,7 @@ async def patch_order(
             body.comment,
             json.dumps(body.model_dump(mode="json", exclude_none=True), default=str),
         )
-    return {"id": str(order_id)}
+    return {"id": str(order_id), "version": cur_version + 1}
 
 
 @router.post("/work-orders/{order_id}/transitions")
@@ -694,19 +708,8 @@ async def transition(
         if not cur:
             raise not_found("Наряд не найден")
         o = dict(cur)
-        states = (
-            MASTER_TRANSITIONS.get(body.action, [])
-            if user["role"] == "master"
-            else WORKER_TRANSITIONS.get(body.action, [])
-        )
-        if user["role"] not in ("master", "worker") or o["status"] not in states:
-            if user["role"] not in ("master", "worker"):
-                raise forbidden()
-            raise AppError(
-                409,
-                "invalid_transition",
-                f"Действие «{body.action}» недоступно для статуса «{o['status']}»",
-            )
+        if user["role"] not in ("master", "worker"):
+            raise forbidden()
         if user["role"] == "master" and str(o["area_id"]) not in user["areaIds"]:
             raise not_found("Наряд не найден")
         if (
@@ -715,6 +718,28 @@ async def transition(
             and not (user["crewId"] and str(o.get("crew_id") or "") == user["crewId"])
         ):
             raise not_found("Наряд не найден")
+        cur_version = int(o.get("version") or 1)
+        if body.expected_version is not None and cur_version != body.expected_version:
+            raise conflict(
+                "version_conflict",
+                "Наряд изменён. Обновите данные и повторите",
+                {
+                    "expected_version": body.expected_version,
+                    "current_version": cur_version,
+                    "version": cur_version,
+                },
+            )
+        states = (
+            MASTER_TRANSITIONS.get(body.action, [])
+            if user["role"] == "master"
+            else WORKER_TRANSITIONS.get(body.action, [])
+        )
+        if o["status"] not in states:
+            raise AppError(
+                409,
+                "invalid_transition",
+                f"Действие «{body.action}» недоступно для статуса «{o['status']}»",
+            )
         frm, to = o["status"], o["status"]
         members = await _assignment_members(conn, o.get("assignee_id"), o.get("crew_id"))
         final_score = None
@@ -952,6 +977,12 @@ async def transition(
         )
         for employee_id in sorted(set(members)):
             await _refresh_status(conn, employee_id)
+        new_version = cur_version + 1
+        await conn.execute(
+            "UPDATE work_orders SET version=$2, updated_at=now() WHERE id=$1::uuid",
+            str(order_id),
+            new_version,
+        )
         return {
             "statusCode": 200,
             "body": {
@@ -959,11 +990,15 @@ async def transition(
                 "from": frm,
                 "to": to,
                 "action": body.action,
+                "version": new_version,
                 **({"score": final_score} if body.action == "close" else {}),
             },
         }
 
-    res = await run_idempotent(key, user["id"], h, action)
+    async def _recheck_access(_conn: Any) -> None:
+        await assert_can_read_order(user, str(order_id))
+
+    res = await run_idempotent(key, user["id"], h, action, _recheck_access)
     return {**res["body"], "replayed": res["replayed"]}
 
 
@@ -1059,6 +1094,7 @@ async def add_materials(
     order_id: uuid.UUID,
     body: list[MaterialItem],
     request: Request,
+    expected_version: int | None = Query(default=None, ge=1),
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     require_role(user, "worker")
@@ -1070,7 +1106,7 @@ async def add_materials(
 
     async def action(conn: Any) -> dict[str, Any]:
         o = await conn.fetchrow(
-            "SELECT status, assignee_id, crew_id FROM work_orders WHERE id=$1::uuid FOR UPDATE",
+            "SELECT status, assignee_id, crew_id, version FROM work_orders WHERE id=$1::uuid FOR UPDATE",
             str(order_id),
         )
         if not o or str(o["status"]) not in ("in_progress", "paused"):
@@ -1081,6 +1117,16 @@ async def add_materials(
             user["crewId"] and str(o.get("crew_id") or "") == user["crewId"]
         ):
             raise not_found("Наряд не найден")
+        if expected_version is not None and int(dict(o).get("version") or 1) != expected_version:
+            raise conflict(
+                "version_conflict",
+                "Наряд изменён. Обновите данные и повторите",
+                {
+                    "expected_version": expected_version,
+                    "current_version": int(dict(o).get("version") or 1),
+                    "version": int(dict(o).get("version") or 1),
+                },
+            )
         for m in body:
             u = await conn.fetchrow(
                 "SELECT unit FROM materials WHERE id=$1::uuid AND deleted_at IS NULL",
@@ -1098,7 +1144,10 @@ async def add_materials(
             )
         return {"statusCode": 201, "body": {"work_order_id": str(order_id), "added": len(body)}}
 
-    res = await run_idempotent(key, user["id"], h, action)
+    async def _recheck_access(_conn: Any) -> None:
+        await assert_can_read_order(user, str(order_id))
+
+    res = await run_idempotent(key, user["id"], h, action, _recheck_access)
     return {**res["body"], "replayed": res["replayed"]}
 
 
@@ -1113,6 +1162,7 @@ class ActionIn(BaseModel):
     client_at: datetime | None = None
     photo_ids: list[uuid.UUID] = Field(default_factory=list, max_length=10)
     form: TransitionForm | None = None
+    expected_version: int | None = Field(default=None, ge=1)
 
     @field_validator("comment", mode="before")
     @classmethod

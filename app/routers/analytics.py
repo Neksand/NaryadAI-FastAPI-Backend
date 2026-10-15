@@ -355,6 +355,16 @@ async def insights(
         for key in ("scope", "evidence"):
             if isinstance(d.get(key), str):
                 d[key] = json.loads(d[key])
+        # order_ids is uuid[] from asyncpg: normalize UUID objects to strings
+        # so the field is stable JSON (FastAPI encoder would coerce anyway).
+        if isinstance(d.get("order_ids"), (list, tuple)):
+            d["order_ids"] = [str(x) for x in d["order_ids"]]
+        if d.get("order_ids") is None:
+            d["order_ids"] = []
+        # Evidence links filled by the insights engine; default when the
+        # column is missing (pre-007 database) so the contract stays stable.
+        d.setdefault("denominator", None)
+        d.setdefault("formula", None)
         out.append(d)
     return {"items": out}
 

@@ -752,3 +752,34 @@ def test_events_log_records_transition_from_to(env):
     payload = accepts[0]["payload"]
     payload = json.loads(payload) if isinstance(payload, str) else payload
     assert (payload.get("from"), payload.get("to")) == ("issued", "accepted")
+
+
+def test_stale_version_conflicts_and_patch_bumps_version(env):
+    client, mh, wh = env["client"], env["mh"], env["wh"]
+    oid = _new_order(env)
+    patched = client.patch(
+        f"/api/v1/work-orders/{oid}", headers=mh, json={"priority": "high", "expected_version": 1}
+    )
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["version"] == 2
+    stale = client.patch(
+        f"/api/v1/work-orders/{oid}",
+        headers=mh,
+        json={"priority": "critical", "expected_version": 1},
+    )
+    assert stale.status_code == 409, stale.text
+    assert stale.json()["error"]["code"] == "version_conflict"
+    accept = _tr(client, wh, oid, "accept", extra={"expected_version": 2})
+    assert accept.status_code == 200, accept.text
+    assert accept.json()["version"] == 3
+
+
+def test_same_key_different_payload_still_conflicts_with_version_field(env):
+    client, wh = env["client"], env["wh"]
+    oid = _new_order(env)
+    key = str(uuid.uuid4())
+    first = _tr(client, wh, oid, "accept", key=key, extra={"expected_version": 1})
+    assert first.status_code == 200, first.text
+    clash = _tr(client, wh, oid, "start", key=key, extra={"expected_version": 2})
+    assert clash.status_code == 409, clash.text
+    assert clash.json()["error"]["code"] == "idempotency_key_reused"

@@ -148,7 +148,7 @@ def api(monkeypatch):
     async def no_read_check(*_args):
         return pool.order
 
-    async def run_idempotent(_key, _actor, _request_hash, action):
+    async def run_idempotent(_key, _actor, _request_hash, action, _access_check=None):
         result = await action(pool.conn)
         return {"body": result["body"], "replayed": False}
 
@@ -811,3 +811,88 @@ def test_full_card_and_review_decode_real_asyncpg_jsonb_shapes(api):
     assert review["improvements"] == []
     assert review["checks"]["completeness"]["pass"] is True
     assert events["items"][0]["payload"]["to"] == "accepted"
+
+
+def test_transition_accepts_matching_version_and_bumps_it(api):
+    pool, client_factory = api
+    pool.order["status"] = "issued"
+    with client_factory(role="worker") as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/transitions",
+            json={"action": "accept", "expected_version": 1},
+        )
+    assert response.status_code == 200, response.text
+    assert response.json()["version"] == 2
+    bump = next(
+        args for query, args in pool.conn.executions if "UPDATE work_orders SET version=" in query
+    )
+    assert tuple(bump) == (ORDER_ID, 2)
+
+
+def test_transition_rejects_stale_version_before_state_change(api):
+    pool, client_factory = api
+    pool.order.update(status="issued", version=2)
+    with client_factory(role="worker") as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/transitions",
+            json={"action": "accept", "expected_version": 1},
+        )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "version_conflict"
+    assert pool.conn.executions == []
+
+
+def test_patch_rejects_stale_version_and_bumps_on_match(api):
+    pool, client_factory = api
+    pool.order.update(status="issued", version=5)
+    with client_factory(role="master") as client:
+        stale = client.patch(
+            f"/api/v1/work-orders/{ORDER_ID}",
+            json={"priority": "high", "expected_version": 4},
+        )
+    assert stale.status_code == 409
+    assert stale.json()["error"]["code"] == "version_conflict"
+    assert pool.conn.executions == []
+
+    with client_factory(role="master") as client:
+        fresh = client.patch(
+            f"/api/v1/work-orders/{ORDER_ID}",
+            json={"priority": "high", "expected_version": 5},
+        )
+    assert fresh.status_code == 200
+    assert fresh.json()["version"] == 6
+    assert "version=version+1" in pool.conn.executions[0][0]
+
+
+def test_materials_reject_stale_version(api):
+    pool, client_factory = api
+    pool.order.update(status="in_progress", version=3)
+    with client_factory(role="worker") as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/materials",
+            params={"expected_version": 2},
+            json=[{"material_id": MATERIAL_ID, "quantity": 1}],
+        )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "version_conflict"
+    assert pool.conn.executions == []
+
+
+def test_order_listing_exposes_version(api):
+    pool, client_factory = api
+    pool.rows = [
+        {
+            "id": uuid.uuid4(),
+            "issued_at": datetime(2026, 3, 2, tzinfo=UTC),
+            "status": "issued",
+            "area_id": AREA_ID,
+            "assignee_id": WORKER_ID,
+            "crew_id": None,
+            "version": 7,
+        }
+    ]
+    with client_factory(role="manager") as client:
+        response = client.get("/api/v1/work-orders", params={"limit": 1})
+    assert response.status_code == 200
+    assert response.json()["items"][0]["version"] == 7
+    assert "w.version" in pool.fetch_calls[-1][0]

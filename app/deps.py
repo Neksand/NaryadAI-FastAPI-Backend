@@ -151,8 +151,15 @@ async def run_idempotent(
     user_id: str,
     request_hash: str,
     action: Callable[[Any], Awaitable[dict[str, Any]]],
+    access_check: Callable[[Any], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
-    """Port of src/common/idempotency.ts. Requires UUID key; replays stored response."""
+    """Port of src/common/idempotency.ts. Requires UUID key; replays stored response.
+
+    When ``access_check`` is given it re-validates the caller's access inside the
+    replay branch (before the stored response is returned): a revoked grant must
+    surface 403/404 instead of a stale replay. The request-hash comparison is
+    always evaluated first and is never weakened.
+    """
     from app.db import get_pool
 
     if not key:
@@ -200,6 +207,8 @@ async def run_idempotent(
         if row["response_status"] is not None:
             import json as _json
 
+            if access_check is not None:
+                await access_check(conn)
             body = (
                 _json.loads(row["response_body"])
                 if isinstance(row["response_body"], str)
