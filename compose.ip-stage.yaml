@@ -1,0 +1,77 @@
+# IP-stage for a Kamatera host WITHOUT a domain yet: plain HTTP on the server IP.
+# Caddy cannot issue TLS for a bare IP, so no ACME/email here.
+# Usage (on server, from the backend checkout):
+#   cp .env.production.example .env.production   # then fill secrets, set NODE_ENV stays production
+#   SERVER_IP=http://<kamatera-ip> docker compose -f compose.ip-stage.yaml --env-file .env.production up -d --build
+# After the domain points at the server, switch to compose.production.yaml (auto-HTTPS).
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.production
+    env_file: .env.production
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: ${COMPOSE_DATABASE_URL:?Set encoded PostgreSQL URL}
+      REDIS_URL: redis://redis:6379/0
+      S3_ENDPOINT: ${S3_ENDPOINT:?Set durable S3 endpoint}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 30s
+    security_opt: [no-new-privileges:true]
+    read_only: true
+    tmpfs: [/tmp]
+    mem_limit: 1g
+    cpus: 2
+    logging:
+      options: {max-size: 10m, max-file: '3'}
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: naryadai
+      POSTGRES_USER: naryadai
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set a random database password}
+    volumes: [postgres_prod:/var/lib/postgresql/data]
+    healthcheck:
+      test: [CMD-SHELL, 'pg_isready -U naryadai -d naryadai']
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 1g
+  redis:
+    image: redis:8-alpine
+    command: [redis-server, --appendonly, 'yes', --maxmemory, 256mb, --maxmemory-policy, noeviction]
+    volumes: [redis_prod:/data]
+    healthcheck:
+      test: [CMD, redis-cli, ping]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+    mem_limit: 384m
+  web:
+    image: caddy:2-alpine
+    environment:
+      SERVER_IP: ${SERVER_IP:?Set http://<kamatera-ip> with scheme, no trailing slash}
+    volumes:
+      - ../NaryadAI-frontend/dist:/srv/web:ro
+      - ./deploy/Caddyfile.ip-stage:/etc/caddy/Caddyfile:ro
+      - caddy_prod:/data
+      - caddy_config_prod:/config
+    ports: ['80:80']
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+    mem_limit: 256m
+volumes:
+  postgres_prod:
+  redis_prod:
+  caddy_prod:
+  caddy_config_prod:

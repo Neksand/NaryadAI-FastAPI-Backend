@@ -1,0 +1,24 @@
+# IP-stage: backend + frontend on one Kamatera host WITHOUT a domain yet.
+# Caddy cannot issue TLS certificates for a bare IP, so this stage is plain HTTP.
+# Set SERVER_IP=http://<kamatera-ip> (scheme required, no trailing slash).
+# After pointing a domain at the server, switch back to Caddyfile.production.
+{
+	admin off
+}
+
+{$SERVER_IP} {
+	encode zstd gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+		X-Frame-Options DENY
+	}
+	handle /api/* {
+		reverse_proxy api:8080
+	}
+	handle {
+		root * /srv/web
+		try_files {path} /index.html
+		file_server
+	}
+}
