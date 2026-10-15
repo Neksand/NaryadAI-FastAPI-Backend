@@ -117,6 +117,9 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
     dup = None
     if after:
         for p in after:
+            if any(p["sha256"] == previous["sha256"] for previous in before):
+                dup = work_order_id
+                break
             other = await conn.fetchval(
                 "SELECT work_order_id FROM photos WHERE sha256=$1 AND work_order_id IS NOT NULL AND work_order_id <> $2::uuid LIMIT 1",
                 p["sha256"],
@@ -149,6 +152,8 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
 
     # vision hook (before+after + key)
     vision_note, vision_score, vision_provider = None, None, "local"
+    vision_confidence, vision_fixed = None, None
+    vision_uncertain = False
     if before and after:
         from app.config import settings
         from app.storage import get_s3
@@ -162,9 +167,27 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
                 try:
                     s_idx, e_idx = text.index("{"), text.rindex("}") + 1
                     v = json.loads(text[s_idx:e_idx])
-                    vision_note, vision_score = str(v.get("note", ""))[:300], int(v.get("score", 3))
+                    if not isinstance(v, dict):
+                        raise ValueError("Expected a vision object")
+                    score, confidence, fixed = v.get("score"), v.get("confidence"), v.get("fixed")
+                    vision_note = str(v.get("note", ""))[:300]
+                    if isinstance(score, bool) or not isinstance(score, int) or not 1 <= score <= 5:
+                        raise ValueError("Invalid vision score")
+                    vision_score = score
+                    vision_fixed = fixed if isinstance(fixed, bool) else None
+                    if (
+                        not isinstance(confidence, bool)
+                        and isinstance(confidence, (int, float))
+                        and 0 <= confidence <= 1
+                    ):
+                        vision_confidence = float(confidence)
+                    vision_uncertain = (
+                        vision_confidence is None or vision_confidence < 0.7 or vision_fixed is None
+                    )
                 except (ValueError, KeyError, TypeError):
                     vision_note = text[:300]
+                    vision_score = None
+                    vision_uncertain = True
         except Exception:
             pass
 
@@ -227,6 +250,7 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
             "confidence": round(float(conf or 0), 2),
             "provider": provider,
         },
+        "confidence_basis": "heuristic_not_calibrated",
         "materials": {"pass": not mat_flag, "confidence": 0.65},
         "photos": {
             "pass": bool(after) and not dup,
@@ -234,6 +258,9 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
             "confidence": 0.72,
             "vision": vision_note,
             "stale_exif": stale_exif,
+            "vision_provider": vision_provider,
+            "vision_confidence": vision_confidence,
+            "semantic_quality_verified": vision_score is not None and not vision_uncertain,
         },
         "safety": {
             "pass": safety_marker is None,
@@ -246,7 +273,14 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
         verdict, score = "needs_rework", 1
     elif missing or dup:
         verdict, score = "needs_rework", max(0, 100 - 30 * len(missing) - (40 if dup else 0))
-    elif confidence < 0.6 or (match is False and (conf or 0) >= 0.7):
+    elif (
+        confidence < 0.6
+        or not match
+        or (conf or 0) < 0.6
+        or vision_uncertain
+        or vision_fixed is False
+        or (vision_score is not None and vision_score <= 2)
+    ):
         verdict, score = "needs_master_review", None
     elif mat_flag or stale_exif:
         verdict, score = "accepted_with_remarks", 82
@@ -264,8 +298,12 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
                 "work": order["work_done_text"],
                 "fault": str(order["fault_code_id"]),
                 "photos": sorted(p["sha256"] for p in after),
+                "materials": [dict(material) for material in mats],
+                "description": order["description"],
+                "comment": _order_text(order, "comment"),
             },
             sort_keys=True,
+            default=str,
         ).encode()
     ).hexdigest()
     vision_label = "зрение Estimin3n" if vision_provider == "estimin3n" else "зрение Gemini"
@@ -275,6 +313,11 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
         + (f", релевантность {provider}" if provider != "local" else "")
         + "."
     )
+    explanation += " Уверенность — эвристическая, не измеренная точность модели."
+    if not vision_note:
+        explanation += " Визуальное устранение дефекта не проверено моделью; проверены только наличие, повторы и метаданные фото."
+    if verdict == "needs_master_review":
+        explanation += " Недостаточно надёжных данных для приёмки: требуется проверка мастером."
     if vision_note:
         explanation += f" Фото: {vision_note}"
     if safety_marker is not None:
@@ -292,16 +335,8 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
         explanation,
         input_hash,
     )
-    if verdict == "needs_rework":
-        await conn.execute(
-            "UPDATE work_orders SET status='rework', return_count=return_count+1, updated_at=now() WHERE id=$1::uuid",
-            work_order_id,
-        )
-        await conn.execute(
-            "INSERT INTO work_order_events(work_order_id, actor_kind, action, payload) VALUES ($1::uuid,'ai','returned',$2::jsonb)",
-            work_order_id,
-            json.dumps({"verdict": verdict}),
-        )
+    # AI produces a recommendation only. The order remains in ai_review;
+    # the master's explicit decision performs any rework/closure transition.
     await conn.execute(
         "INSERT INTO work_order_events(work_order_id, actor_kind, action, payload) VALUES ($1::uuid,'ai','ai_review_done',$2::jsonb)",
         work_order_id,
@@ -309,7 +344,7 @@ async def run_ai_review(conn: Any, work_order_id: str) -> dict[str, Any]:
     )
     await conn.execute(
         "INSERT INTO outbox_events(event, channels, payload) VALUES ('order.ai_review_ready',$1,$2::jsonb)",
-        [f"order:{work_order_id}"],
+        ["shift:current", f"order:{work_order_id}"],
         json.dumps({"id": work_order_id, "verdict": verdict}),
     )
     return {"verdict": verdict, "score": score, "attempt": int(attempt)}

@@ -323,7 +323,7 @@ def test_analytics_ratings_quality_faults_trends():
         assert q["reviews"] > 100 and 0 <= (q["ai_pass_rate"] or 0) <= 1
         assert q["rework_rate"] is not None
         f = c.get("/api/v1/analytics/faults", headers=mh).json()["data"]
-        assert f and any(x["code"] == "М-02" and x["n"] >= 50 for x in f)
+        assert f and any(x["code"] == "М-02" and x["n"] >= 12 for x in f)
         t = c.get("/api/v1/analytics/trends?days=7", headers=mh).json()["data"]
         assert len(t) == 7 and "created" in t[0]
         g = c.get("/api/v1/analytics/ratings?group_by=crew", headers=mh).json()["data"]

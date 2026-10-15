@@ -1,0 +1,44 @@
+{
+  "at": "2026-10-14T17:12:17.985210+00:00",
+  "base_url": "http://127.0.0.1:8080",
+  "concurrency": 5,
+  "wall_seconds": 0.138,
+  "overall": {
+    "requests": 100,
+    "errors": 0,
+    "p50_ms": 2.834,
+    "p95_ms": 5.098,
+    "max_ms": 6.857,
+    "status_counts": {
+      "200": 100
+    }
+  },
+  "endpoints": {
+    "/api/v1/work-orders?limit=20": {
+      "requests": 50,
+      "errors": 0,
+      "p50_ms": 2.69,
+      "p95_ms": 4.795,
+      "max_ms": 5.165,
+      "status_counts": {
+        "200": 50
+      }
+    },
+    "/api/v1/analytics/dashboard": {
+      "requests": 50,
+      "errors": 0,
+      "p50_ms": 2.865,
+      "p95_ms": 5.614,
+      "max_ms": 6.857,
+      "status_counts": {
+        "200": 50
+      }
+    }
+  },
+  "limitations": [
+    "Local read-only sample of 100 HTTP GET requests; one synthetic login.",
+    "No production throughput/SLA conclusion; concurrent development services may affect timing.",
+    "No Android, external push, AI or write load measured."
+  ],
+  "status": "PASS"
+}

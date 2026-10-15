@@ -1,0 +1,174 @@
+{
+  "started_at": "2026-10-14T17:07:21.374412+00:00",
+  "base_url": "http://127.0.0.1:8080",
+  "python": "3.12.14",
+  "status": "PASS",
+  "checks": [
+    {
+      "name": "readiness",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 14.03
+    },
+    {
+      "name": "invalid_token_rejected",
+      "status": "PASS"
+    },
+    {
+      "name": "login_master",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 29.8
+    },
+    {
+      "name": "login_worker",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 52.79
+    },
+    {
+      "name": "login_other",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 41.39
+    },
+    {
+      "name": "login_manager",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 41.38
+    },
+    {
+      "name": "GET /api/v1/dict/equipment",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.96
+    },
+    {
+      "name": "master_worker_common_area",
+      "status": "PASS"
+    },
+    {
+      "name": "create_synthetic_order",
+      "status": "PASS",
+      "http_status": 201,
+      "elapsed_ms": 8.35
+    },
+    {
+      "name": "unassigned_worker_http_scope_denied",
+      "status": "PASS",
+      "http_status": 404,
+      "elapsed_ms": 1.95
+    },
+    {
+      "name": "master_order_subscription",
+      "status": "PASS"
+    },
+    {
+      "name": "master_shift_subscription",
+      "status": "PASS"
+    },
+    {
+      "name": "worker_order_subscription",
+      "status": "PASS"
+    },
+    {
+      "name": "worker_personal_subscription",
+      "status": "PASS"
+    },
+    {
+      "name": "manager_shift_subscription",
+      "status": "PASS"
+    },
+    {
+      "name": "unassigned_worker_ws_scope_denied",
+      "status": "PASS"
+    },
+    {
+      "name": "transition_accept",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.62
+    },
+    {
+      "name": "single_real_accept_transition",
+      "status": "PASS"
+    },
+    {
+      "name": "unauthorized_observer_received_no_transition",
+      "status": "PASS"
+    },
+    {
+      "name": "all_five_subscribers_received_within_5_seconds",
+      "status": "PASS"
+    },
+    {
+      "name": "refetch_authoritative_state",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.32
+    },
+    {
+      "name": "authoritative_status_accepted",
+      "status": "PASS"
+    }
+  ],
+  "metrics": {
+    "maximum_delivery_seconds": 0.3857,
+    "total_seconds": 6.57
+  },
+  "created_order_ids": [
+    "7062c852-fed7-44ed-8d6d-57adc47a2b14"
+  ],
+  "limitations": [
+    "One synthetic order transition, five positive subscribers and one negative observer.",
+    "Latency starts before the HTTP transition request; includes API and outbox delivery.",
+    "One local API process; this is not throughput, saturation or production SLA evidence.",
+    "No production network, mobile background delivery, TLS or multi-process fan-out test.",
+    "Authenticated session and order/channel scope are exercised, not all role combinations.",
+    "One synthetic order and login sessions are retained; no reset or deletion is performed."
+  ],
+  "scenario": "five-subscriber local event delivery",
+  "subscriber_count": 5,
+  "negative_observer_count": 1,
+  "criterion_seconds": 5,
+  "deliveries": [
+    {
+      "subscriber": "master_order",
+      "status": "PASS",
+      "latency_seconds": 0.3849,
+      "event_received": true
+    },
+    {
+      "subscriber": "master_shift",
+      "status": "PASS",
+      "latency_seconds": 0.3854,
+      "event_received": true
+    },
+    {
+      "subscriber": "worker_order",
+      "status": "PASS",
+      "latency_seconds": 0.3838,
+      "event_received": true
+    },
+    {
+      "subscriber": "worker_personal",
+      "status": "PASS",
+      "latency_seconds": 0.3843,
+      "event_received": true
+    },
+    {
+      "subscriber": "manager_shift",
+      "status": "PASS",
+      "latency_seconds": 0.3857,
+      "event_received": true
+    }
+  ],
+  "negative_observer": {
+    "subscriber": "unassigned_worker",
+    "status": "PASS",
+    "event_received": false,
+    "observation_seconds": 5
+  },
+  "finished_at": "2026-10-14T17:07:27.944405+00:00"
+}

@@ -1,4 +1,5 @@
 -r requirements.txt
+pytest>=8.0
 # numpy: the audio-transcription tests build real arrays while soundfile/librosa
 # are mocked; it only ships with the optional requirements-hf-audio runtime.
 numpy>=1.26

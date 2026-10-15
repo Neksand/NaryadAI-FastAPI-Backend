@@ -107,13 +107,21 @@ def test_endpoint_returns_sorted_forecast_matching_pure_score(make_client):
     items = response.json()
     assert [i["equipment_name"] for i in items] == ["Конвейер К-3", "Дробилка", "Насос"]
     for item in items:
-        assert set(item) == {"equipment_id", "equipment_name", "probability", "recent", "growth"}
+        assert set(item) == {
+            "equipment_id",
+            "equipment_name",
+            "probability",
+            "recent",
+            "growth",
+            "score_kind",
+        }
     top = items[0]
     assert top["recent"] == 8
     assert top == {
         "equipment_id": str(pool.rows[0]["id"]),
         "equipment_name": "Конвейер К-3",
         "recent": 8,
+        "score_kind": "heuristic_risk_index",
         **score_forecast(8, 1, "A"),
     }
     probs = [i["probability"] for i in items]
@@ -141,3 +149,15 @@ def test_endpoint_query_aggregates_unplanned_windows(make_client):
     assert "30 days" in query and "60 days" in query
     assert "equipment" in query
     assert args == ()
+
+
+@pytest.mark.parametrize("areas", [[], [str(uuid.uuid4())]])
+def test_master_forecast_is_restricted_to_assigned_areas(make_client, areas):
+    pool = Pool()
+    response = make_client(pool, role="master", areaIds=areas).get(
+        "/api/v1/analytics/failure-forecast"
+    )
+    assert response.status_code == 200
+    query, args = pool.fetch_calls[-1]
+    assert "e.area_id = ANY($1::uuid[])" in query
+    assert args == (areas,)

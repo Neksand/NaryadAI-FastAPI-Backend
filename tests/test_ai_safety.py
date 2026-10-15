@@ -109,8 +109,8 @@ def test_each_safety_marker_in_work_text_forces_rework_with_score_one(marker):
     assert result == {"verdict": "needs_rework", "score": 1, "attempt": 1}
     assert review["score"] == 1
     assert review["checks"]["safety"] == {"pass": False, "confidence": 0.95, "marker": marker}
-    assert conn.order["status"] == "rework"
-    assert any("VALUES ($1::uuid,'ai','returned'" in q for q, _ in conn.executions)
+    assert conn.order["status"] == "ai_review"
+    assert not any("UPDATE work_orders" in q for q, _ in conn.executions)
 
 
 def test_safety_marker_in_description_is_caught():

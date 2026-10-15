@@ -26,6 +26,8 @@ class Settings(BaseSettings):
     PDF_FONT_PATH: str = ""
     # --- External AI (all optional, local rules-v1 works without keys) ---
     AI_MODE: str = "mock"
+    # Explicit operator opt-in after approving/de-identifying outbound content.
+    AI_EXTERNAL_ENABLED: bool = False
     AI_TEXT_PROVIDER: str = "auto"
     AI_VISION_PROVIDER: str = "auto"
     GEMINI_API_KEY: str = ""
@@ -76,6 +78,14 @@ def load_settings() -> "Settings":
         raise RuntimeError("SEED_ADMIN_PIN must be 4-8 digits")
     if s.NODE_ENV == "production" and s.SEED_ADMIN_PIN == "1234":
         raise RuntimeError("Set a non-default SEED_ADMIN_PIN in production")
+    if s.NODE_ENV == "production" and (
+        len(set(s.ACCESS_TOKEN_SECRET)) < 8
+        or any(
+            marker in s.ACCESS_TOKEN_SECRET.lower()
+            for marker in ("replace", "change-me", "changeme", "placeholder", "example")
+        )
+    ):
+        raise RuntimeError("Set a generated, non-placeholder ACCESS_TOKEN_SECRET in production")
     return s
 
 

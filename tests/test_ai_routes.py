@@ -267,8 +267,9 @@ def test_inspection_job_transitions_to_completed_or_failed_without_breaking_orde
     import app.services.ai_review as ai_review
 
     oid = uuid.uuid4()
-    pool = Pool(order={"status": "ai_review"}, job={"id": uuid.uuid4()})
-    client = api(pool, role="worker")[0]
+    user_id = str(uuid.uuid4())
+    pool = Pool(order={"status": "ai_review", "assignee_id": user_id}, job={"id": uuid.uuid4()})
+    client = api(pool, role="worker", id=user_id)[0]
 
     async def success(conn, work_order_id):
         assert str(oid) == work_order_id
@@ -280,8 +281,10 @@ def test_inspection_job_transitions_to_completed_or_failed_without_breaking_orde
     assert response.json()["data"]["status"] == "COMPLETED"
     assert json.loads(pool.execute_calls[-1][1][1]) == {"verdict": "accepted", "score": 90}
 
-    failing_pool = Pool(order={"status": "ai_review"}, job={"id": uuid.uuid4()})
-    failing_client = api(failing_pool, role="worker")[0]
+    failing_pool = Pool(
+        order={"status": "ai_review", "assignee_id": user_id}, job={"id": uuid.uuid4()}
+    )
+    failing_client = api(failing_pool, role="worker", id=user_id)[0]
 
     async def failure(*_):
         raise RuntimeError("inference unavailable")
@@ -306,3 +309,33 @@ def test_inspection_result_serializes_nested_uuid_and_alias_is_stable(api):
     assert result["job"]["id"] == str(job_id)
     assert result["review"]["id"] == str(review_id)
     assert client.get("/api/v1/ai/insights").status_code == 200
+
+
+def test_inspection_decodes_asyncpg_jsonb_job_and_review_columns(api):
+    uid = str(uuid.uuid4())
+    pool = Pool(
+        order={"assignee_id": uid},
+        job={"id": uuid.uuid4(), "result": '{"verdict":"accepted"}'},
+        review={
+            "id": uuid.uuid4(),
+            "checks": '{"completeness":{"pass":true}}',
+            "strengths": '["полнота"]',
+            "improvements": "[]",
+        },
+    )
+    response = api(pool, role="worker", id=uid)[0].get(
+        f"/api/v1/ai/work-orders/{uuid.uuid4()}/inspection"
+    )
+    assert response.status_code == 200
+    data = response.json()["data"]
+    assert data["job"]["result"] == {"verdict": "accepted"}
+    assert data["review"]["strengths"] == ["полнота"]
+    assert data["review"]["improvements"] == []
+    assert data["review"]["checks"]["completeness"]["pass"] is True
+
+
+def test_worker_cannot_trigger_inspection_for_someone_elses_order(api):
+    pool = Pool(order={"status": "ai_review", "assignee_id": str(uuid.uuid4()), "crew_id": None})
+    response = api(pool, role="worker")[0].post(f"/api/v1/ai/work-orders/{uuid.uuid4()}/inspect")
+    assert response.status_code == 404
+    assert not any("INSERT INTO ai_jobs" in query for query, _ in pool.fetchrow_calls)

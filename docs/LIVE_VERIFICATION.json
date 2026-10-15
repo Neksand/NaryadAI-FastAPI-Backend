@@ -1,0 +1,390 @@
+{
+  "started_at": "2026-10-14T17:05:05.025927+00:00",
+  "base_url": "http://127.0.0.1:8080",
+  "python": "3.12.14",
+  "status": "PASS",
+  "checks": [
+    {
+      "name": "readiness",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 16.2
+    },
+    {
+      "name": "anonymous_denied",
+      "status": "PASS",
+      "http_status": 401,
+      "elapsed_ms": 10.93
+    },
+    {
+      "name": "login_master",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 31.04
+    },
+    {
+      "name": "login_worker",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 24.87
+    },
+    {
+      "name": "login_other",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 25.27
+    },
+    {
+      "name": "login_manager",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 24.24
+    },
+    {
+      "name": "equipment_reference",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 6.52
+    },
+    {
+      "name": "fault_reference",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 1.52
+    },
+    {
+      "name": "reason_reference",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 1.74
+    },
+    {
+      "name": "worker_create_denied",
+      "status": "PASS",
+      "http_status": 403,
+      "elapsed_ms": 1.46
+    },
+    {
+      "name": "master_create",
+      "status": "PASS",
+      "http_status": 201,
+      "elapsed_ms": 6.78
+    },
+    {
+      "name": "create_replay",
+      "status": "PASS",
+      "http_status": 201,
+      "elapsed_ms": 1.59
+    },
+    {
+      "name": "create_exactly_once",
+      "status": "PASS"
+    },
+    {
+      "name": "same_key_different_payload_denied",
+      "status": "PASS",
+      "http_status": 409,
+      "elapsed_ms": 1.46
+    },
+    {
+      "name": "other_worker_read_denied",
+      "status": "PASS",
+      "http_status": 404,
+      "elapsed_ms": 1.55
+    },
+    {
+      "name": "other_worker_mutation_denied",
+      "status": "PASS",
+      "http_status": 404,
+      "elapsed_ms": 1.98
+    },
+    {
+      "name": "manager_mutation_denied",
+      "status": "PASS",
+      "http_status": 403,
+      "elapsed_ms": 1.7
+    },
+    {
+      "name": "start_before_accept_denied",
+      "status": "PASS",
+      "http_status": 409,
+      "elapsed_ms": 1.56
+    },
+    {
+      "name": "websocket_subscription",
+      "status": "PASS"
+    },
+    {
+      "name": "accept_once",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.08
+    },
+    {
+      "name": "accept_idempotent_replay",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 1.74
+    },
+    {
+      "name": "same_action_replayed",
+      "status": "PASS"
+    },
+    {
+      "name": "websocket_update_under_5_seconds",
+      "status": "PASS"
+    },
+    {
+      "name": "websocket_reconnect",
+      "status": "PASS"
+    },
+    {
+      "name": "refetch_after_reconnect",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 11.57
+    },
+    {
+      "name": "authoritative_state_after_reconnect",
+      "status": "PASS"
+    },
+    {
+      "name": "transition_start",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.74
+    },
+    {
+      "name": "pause_requires_reason",
+      "status": "PASS",
+      "http_status": 422,
+      "elapsed_ms": 1.97
+    },
+    {
+      "name": "transition_pause",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.38
+    },
+    {
+      "name": "transition_resume",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.94
+    },
+    {
+      "name": "unplanned_completion_requires_after_photo",
+      "status": "PASS",
+      "http_status": 422,
+      "elapsed_ms": 2.62
+    },
+    {
+      "name": "invalid_image_bytes_denied",
+      "status": "PASS",
+      "http_status": 422,
+      "elapsed_ms": 1.93
+    },
+    {
+      "name": "forged_jpeg_header_denied",
+      "status": "PASS",
+      "http_status": 422,
+      "elapsed_ms": 20.2
+    },
+    {
+      "name": "synthetic_after_photo_uploaded",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 6.14
+    },
+    {
+      "name": "transition_complete",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.23
+    },
+    {
+      "name": "background_ai_review_available",
+      "status": "PASS",
+      "attempt": 1,
+      "verdict": "needs_rework"
+    },
+    {
+      "name": "safety_rule_requires_rework",
+      "status": "PASS"
+    },
+    {
+      "name": "state_after_ai",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 2.24
+    },
+    {
+      "name": "ai_keeps_human_decision_pending",
+      "status": "PASS"
+    },
+    {
+      "name": "worker_cannot_close",
+      "status": "PASS",
+      "http_status": 409,
+      "elapsed_ms": 1.8
+    },
+    {
+      "name": "transition_return_to_rework",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.91
+    },
+    {
+      "name": "transition_start",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 2.79
+    },
+    {
+      "name": "transition_complete",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.27
+    },
+    {
+      "name": "background_ai_review_available",
+      "status": "PASS",
+      "attempt": 2,
+      "verdict": "accepted"
+    },
+    {
+      "name": "transition_close",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 5.52
+    },
+    {
+      "name": "human_final_close",
+      "status": "PASS"
+    },
+    {
+      "name": "terminal_state_immutable",
+      "status": "PASS",
+      "http_status": 409,
+      "elapsed_ms": 2.45
+    },
+    {
+      "name": "audit_history",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 2.78
+    },
+    {
+      "name": "audit_authors_times_and_lifecycle",
+      "status": "PASS"
+    },
+    {
+      "name": "idempotent_accept_single_event",
+      "status": "PASS"
+    },
+    {
+      "name": "order_report",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.19
+    },
+    {
+      "name": "report_contains_human_decision",
+      "status": "PASS"
+    },
+    {
+      "name": "board_read",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.69
+    },
+    {
+      "name": "summary_read",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.08
+    },
+    {
+      "name": "dashboard_read",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.28
+    },
+    {
+      "name": "ratings_read",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.26
+    },
+    {
+      "name": "worker_notifications",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 4.4
+    },
+    {
+      "name": "assignment_notification_persisted",
+      "status": "PASS"
+    },
+    {
+      "name": "create_rejection_scenario",
+      "status": "PASS",
+      "http_status": 201,
+      "elapsed_ms": 4.32
+    },
+    {
+      "name": "transition_queue",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.99
+    },
+    {
+      "name": "rejection_requires_reason",
+      "status": "PASS",
+      "http_status": 422,
+      "elapsed_ms": 1.69
+    },
+    {
+      "name": "transition_reject",
+      "status": "PASS",
+      "http_status": 200,
+      "elapsed_ms": 3.22
+    },
+    {
+      "name": "rejection_recorded",
+      "status": "PASS"
+    },
+    {
+      "name": "create_short_deadline_scenario",
+      "status": "PASS",
+      "http_status": 201,
+      "elapsed_ms": 3.47
+    },
+    {
+      "name": "real_deadline_worker_and_master_notification",
+      "status": "PASS"
+    }
+  ],
+  "metrics": {
+    "websocket_accept_seconds": 0.341,
+    "ai_review_seconds": [
+      0.511,
+      0.517
+    ],
+    "overdue_notification_after_deadline_seconds": 9.157,
+    "total_seconds": 13.894
+  },
+  "created_order_ids": [
+    "e847e802-17ae-4f84-84c2-6ce5c32c92dc",
+    "c6d1f716-5339-49cf-8828-25ebfef2b66b",
+    "7ab8feca-42da-4cb6-ac37-eb44ec703dce"
+  ],
+  "limitations": [
+    "Synthetic local API test; no Android or browser interaction.",
+    "WebSocket latency measures one local event, not a production SLA.",
+    "External AI, FCM delivery, TLS and production deployment are not verified.",
+    "Acceptance escalation (3/10 min) and manager escalation (120 min) are not time-accelerated.",
+    "Test records are retained; no reset or deletion is performed."
+  ],
+  "finished_at": "2026-10-14T17:05:18.920033+00:00"
+}

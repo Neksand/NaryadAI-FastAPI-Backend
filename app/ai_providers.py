@@ -2,8 +2,9 @@
 
 Gemini goes through the official `google-genai` SDK (supports current
 auth keys); OpenRouter/Groq/Pollinations use OpenAI-compatible REST.
-Only anonymized work texts and photo bytes leave the контур — never names,
-PINs or tokens. Every call is short-timeout and returns None on failure.
+Hosted text, photo and audio calls require AI_EXTERNAL_ENABLED. Free text and
+pixels are not automatically anonymized; operators must approve and de-identify
+data before opting in. Every call is short-timeout and returns None on failure.
 """
 
 import asyncio
@@ -131,8 +132,10 @@ async def chat_text(system: str, user: str) -> tuple[str | None, str]:
     s = _settings()
     order = [p.strip() for p in s.AI_TEXT_PROVIDER.split(",") if p.strip()] or ["auto"]
     if order == ["auto"]:
-        order = ["gemini", "openrouter", "groq", "pollinations"]
+        order = ["gemini", "openrouter", "groq"]
     order = [p for p in order if p != "off"]
+    if not getattr(s, "AI_EXTERNAL_ENABLED", False):
+        order = [p for p in order if p == "estimin3n"]
     if not order:
         return None, "local"
 
@@ -195,6 +198,8 @@ async def compare_photos(before: bytes, after: bytes, context: str) -> tuple[str
             return None, "estimin3n"
     if provider not in ("auto", "gemini") or not settings.GEMINI_API_KEY:
         return None, "local"
+    if not settings.AI_EXTERNAL_ENABLED:
+        return None, "local"
     key, model = _gemini_client()
 
     def b64(b: bytes) -> str:
@@ -209,7 +214,7 @@ async def compare_photos(before: bytes, after: bytes, context: str) -> tuple[str
                     {
                         "text": (
                             "Ты контролёр ремонта. Сравни фото ДО и ПОСЛЕ. Ответь строго JSON: "
-                            '{"fixed": true|false, "score": 1-5, "note": "коротко по-русски"}. '
+                            '{"fixed": true|false, "score": 1-5, "confidence": 0.0-1.0, "note": "коротко по-русски"}. '
                             "Никаких персональных данных в ответе."
                         )
                     }
@@ -395,7 +400,7 @@ def _estimin3n_compare_photos(before: bytes, after: bytes, context: str) -> str:
     prompt = (
         f"Контекст наряда (обезличен): {context}. Первое фото — ДО, второе — ПОСЛЕ. "
         "Сравни состояние оборудования и результат ремонта. Ответь строго JSON: "
-        '{"fixed": true|false, "score": 1-5, "note": "коротко по-русски"}. '
+        '{"fixed": true|false, "score": 1-5, "confidence": 0.0-1.0, "note": "коротко по-русски"}. '
         "Не выдумывай невидимые детали и не включай персональные данные."
     )
     messages: list[dict[str, Any]] = [
@@ -425,7 +430,7 @@ async def transcribe_audio(
     if provider == "off":
         return None, "local"
 
-    if provider in ("auto", "groq") and s.GROQ_API_KEY:
+    if provider in ("auto", "groq") and s.GROQ_API_KEY and getattr(s, "AI_EXTERNAL_ENABLED", False):
         try:
             async with httpx.AsyncClient(timeout=60.0) as client:
                 r = await client.post(

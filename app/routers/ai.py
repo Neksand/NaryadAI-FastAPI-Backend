@@ -91,6 +91,9 @@ async def inspect_order(
 ) -> dict[str, Any]:
     """Creates an ai_jobs row (PENDING->PROCESSING->COMPLETED/FAILED), never blocks the order."""
     require_role(user, "master", "manager", "admin", "worker")
+    from app.deps import assert_can_read_order
+
+    await assert_can_read_order(user, str(oid))
     pool = await get_pool()
     order = await pool.fetchrow("SELECT status FROM work_orders WHERE id=$1::uuid", str(oid))
     if not order:
@@ -141,19 +144,7 @@ async def get_inspection(
         str(oid),
     )
 
-    def _s(r: Any) -> dict[str, Any]:
-        import uuid as _u
-        from decimal import Decimal as _D
-
-        d = dict(r)
-        for k, v in list(d.items()):
-            if isinstance(v, _u.UUID):
-                d[k] = str(v)
-            # numeric(...) приходит Decimal: контракт требует JSON-число
-            # (Zod ждёт number; поведение jsonable_encoder зависит от версии FastAPI).
-            elif isinstance(v, _D):
-                d[k] = float(v)
-        return d
+    from app.routers.work_orders import _row_to_dict as _s
 
     return {"data": {"job": _s(job) if job else None, "review": _s(review) if review else None}}
 

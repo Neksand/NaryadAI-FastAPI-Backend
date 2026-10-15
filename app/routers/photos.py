@@ -61,7 +61,11 @@ def _exif_taken_at(data: bytes) -> datetime | None:
             return None
         from datetime import datetime
 
-        return datetime.strptime(str(raw), "%Y:%m:%d %H:%M:%S")
+        parsed = datetime.strptime(str(raw), "%Y:%m:%d %H:%M:%S")
+        offset = exif.get(36881) or exif.get(36880)  # OffsetTimeOriginal / OffsetTime
+        if offset and re.fullmatch(r"[+-]\d{2}:\d{2}", str(offset)):
+            return datetime.fromisoformat(parsed.isoformat() + str(offset)).astimezone(UTC)
+        return parsed
     except Exception:
         return None
 
@@ -109,6 +113,42 @@ def _verify(data: bytes, mime: str) -> None:
     )
     if not ok:
         raise validation_error([{"path": "file", "message": "Файл не похож на заявленный формат"}])
+    import io
+    import warnings
+
+    from PIL import Image
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(io.BytesIO(data)) as image:
+                if (
+                    image.format
+                    != {"image/jpeg": "JPEG", "image/png": "PNG", "image/webp": "WEBP"}[mime]
+                ):
+                    raise ValueError("Image format mismatch")
+                if image.width * image.height > 25_000_000:
+                    raise ValueError("Image dimensions exceed limit")
+                image.verify()
+            # verify() checks container integrity; load() also rejects truncated
+            # pixel streams. This happens before any storage or database write.
+            with Image.open(io.BytesIO(data)) as image:
+                image.load()
+    except (
+        OSError,
+        ValueError,
+        SyntaxError,
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+    ) as exc:
+        raise validation_error(
+            [
+                {
+                    "path": "file",
+                    "message": "Повреждённое изображение или размер больше 25 мегапикселей",
+                }
+            ]
+        ) from exc
 
 
 def _parse_client_taken_at(value: str | None) -> datetime | None:
@@ -172,9 +212,11 @@ async def _create_photo(
                 user["crewId"] and str(order.get("crew_id") or "") == user["crewId"]
             ):
                 raise forbidden()
-    taken_at = _exif_taken_at(data) or _parse_client_taken_at(client_taken_at)
-    if taken_at is not None and taken_at.tzinfo is None:
-        taken_at = taken_at.replace(tzinfo=UTC)
+    exif_time = _exif_taken_at(data)
+    client_time = _parse_client_taken_at(client_taken_at)
+    # DateTimeOriginal alone is a camera's wall clock, not UTC. Without an EXIF
+    # offset prefer the explicit client timestamp, otherwise freshness is unknown.
+    taken_at = exif_time if exif_time is not None and exif_time.tzinfo is not None else client_time
     if mime == "image/jpeg":
         data = _strip_jpeg_exif(data)
     digest = hashlib.sha256(data).hexdigest()

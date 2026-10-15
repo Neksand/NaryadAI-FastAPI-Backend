@@ -2,7 +2,7 @@
 
 Detectors (30-day window, Russian headlines + recommendations):
   repeat_failure   — one fault code dominates one equipment (>=4, >=50% share)
-  post_ppr_failure — unplanned job within 14 days after a planned one, same equipment
+  post_ppr_failure — unplanned job within 14 days after completed planned maintenance, same equipment
   material_anomaly — writeoff quantity > 2x typical_usage_per_order
   shift_correlation — breakdowns skew to one shift (chi-ish: share >=60%, n>=6)
   unplanned_growth  — unplanned count last 30d >= 2x previous 30d per equipment
@@ -79,8 +79,8 @@ async def generate_insights(conn: Any) -> list[str]:
            JOIN equipment e ON e.id=u.equipment_id
            WHERE u.kind='unplanned' AND u.issued_at >= now()-interval '30 days'
              AND EXISTS (SELECT 1 FROM work_orders p WHERE p.equipment_id=u.equipment_id
-                         AND p.kind='planned' AND p.issued_at < u.issued_at
-                         AND p.issued_at >= u.issued_at - interval '14 days')
+                         AND p.kind='planned' AND p.status='closed' AND p.done_at < u.issued_at
+                         AND p.done_at >= u.issued_at - interval '14 days')
            LIMIT 20"""
     )
     seen = set()
@@ -187,11 +187,11 @@ async def generate_insights(conn: Any) -> list[str]:
                 "material_anomaly",
                 "info",
                 {"equipment_id": str(r["equipment_id"])},
-                f"{eq}: простой {round(r['hours'], 1)} ч за 30 дней — максимум по парку",
+                f"{eq}: простой {round(r['hours'], 1)} ч за 30 дней — входит в тройку по длительности",
                 [{"metric": "downtime_hours", "value": round(r["hours"], 1)}],
                 "Разберите причины простоев по шифрам и включите узел в план ППР.",
                 0.6,
-                f"{eq_kk}: 30 күнде тоқтау {round(r['hours'], 1)} сағ — парк бойынша максимум",
+                f"{eq_kk}: 30 күнде тоқтау {round(r['hours'], 1)} сағ — ұзақтығы бойынша алғашқы үштікте",
                 "Шифрлар бойынша тоқтау себептерін талдап, торапты ЖЖЖ жоспарына енгізіңіз.",
             )
     # 7. executor_pattern via z-score on durations (baseline = previous 60-30d)

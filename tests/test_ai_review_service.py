@@ -194,8 +194,8 @@ def test_unplanned_work_without_after_photo_is_returned_with_missing_field_evide
     assert review["score"] == 70
     assert review["photo_score"] == 1
     assert review["checks"]["photos"]["pass"] is False
-    assert conn.order["status"] == "rework"
-    assert any("VALUES ($1::uuid,'ai','returned'" in q for q, _ in conn.executions)
+    assert conn.order["status"] == "ai_review"
+    assert not any("UPDATE work_orders" in q for q, _ in conn.executions)
 
 
 def test_exact_duplicate_photo_is_returned_even_when_text_is_complete():
@@ -207,7 +207,7 @@ def test_exact_duplicate_photo_is_returned_even_when_text_is_complete():
     assert result == {"verdict": "needs_rework", "score": 60, "attempt": 1}
     assert review["photo_score"] == 1
     assert review["checks"]["photos"]["pass"] is False
-    assert conn.order["status"] == "rework"
+    assert conn.order["status"] == "ai_review"
 
 
 @pytest.mark.parametrize(("other_hash", "is_duplicate"), [("003f", True), ("007f", False)])
@@ -276,9 +276,12 @@ def test_confident_text_disagreement_requests_master_decision_instead_of_auto_re
     assert conn.order["status"] == "ai_review"
 
 
-def test_vision_scores_are_clamped_and_provider_note_is_preserved(monkeypatch):
+def test_valid_vision_evidence_and_provider_note_are_preserved(monkeypatch):
     async def compare(*_args):
-        return '{"note":"Повреждение осталось", "score": 9}', "estimin3n"
+        return (
+            '{"note":"Дефект устранён", "score": 5, "confidence": 0.9, "fixed": true}',
+            "estimin3n",
+        )
 
     class FakeS3:
         def get_object(self, **_kwargs):
@@ -308,5 +311,73 @@ def test_vision_scores_are_clamped_and_provider_note_is_preserved(monkeypatch):
 
     review = conn.inserted_review()
     assert review["photo_score"] == 5
-    assert review["checks"]["photos"]["vision"] == "Повреждение осталось"
+    assert review["checks"]["photos"]["vision"] == "Дефект устранён"
     assert "зрение Estimin3n" in review["explanation"]
+
+
+def test_unrelated_local_text_never_receives_accepted_score():
+    conn = ReviewConn(
+        order={"description": "Перегрев двигателя", "work_done_text": "Покрасил ограждение"}
+    )
+    result = run(ai_review.run_ai_review(conn, "order-1"))
+    assert result["verdict"] == "needs_master_review"
+    assert result["score"] is None
+    assert conn.order["status"] == "ai_review"
+    assert "не проверено моделью" in conn.inserted_review()["explanation"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        '{"score": 9, "fixed": true, "confidence": 0.99}',
+        '{"score": true, "fixed": true, "confidence": 0.99}',
+        '{"score": 5, "fixed": true, "confidence": 0.2}',
+        '{"score": 5, "fixed": true}',
+        '{"score": 1, "fixed": false, "confidence": 0.9}',
+        "not JSON",
+        "[1,2,3]",
+    ],
+)
+def test_uncertain_invalid_or_negative_vision_requires_human_review(monkeypatch, response):
+    async def compare(*_args):
+        return response, "gemini-vision"
+
+    class FakeS3:
+        def get_object(self, **_kwargs):
+            return {"Body": type("Body", (), {"read": lambda self: b"image"})()}
+
+    monkeypatch.setattr(ai_providers, "compare_photos", compare)
+    monkeypatch.setattr(storage, "get_s3", lambda: FakeS3())
+    photos = [
+        {
+            "kind": kind,
+            "sha256": kind,
+            "phash": None,
+            "exif_taken_at": None,
+            "object_key": f"{kind}.jpg",
+        }
+        for kind in ("before", "after")
+    ]
+    conn = ReviewConn(photos=photos)
+    result = run(ai_review.run_ai_review(conn, "order-1"))
+    assert result["verdict"] == "needs_master_review"
+    assert result["score"] is None
+    assert conn.order["status"] == "ai_review"
+
+
+def test_identical_before_and_after_photo_is_detected_within_same_order(monkeypatch):
+    monkeypatch.setattr(storage, "get_s3", lambda: (_ for _ in ()).throw(RuntimeError("offline")))
+    photos = [
+        {
+            "kind": kind,
+            "sha256": "same-image",
+            "phash": None,
+            "exif_taken_at": None,
+            "object_key": f"{kind}.jpg",
+        }
+        for kind in ("before", "after")
+    ]
+    conn = ReviewConn(photos=photos)
+    result = run(ai_review.run_ai_review(conn, "order-1"))
+    assert result["verdict"] == "needs_rework"
+    assert conn.inserted_review()["checks"]["photos"]["pass"] is False

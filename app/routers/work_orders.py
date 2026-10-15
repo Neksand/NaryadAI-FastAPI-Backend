@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import AwareDatetime, BaseModel, Field, TypeAdapter, ValidationError, field_validator
 
 from app.db import get_pool
 from app.deps import (
@@ -82,7 +82,7 @@ class CreateWO(BaseModel):
     assignee_id: uuid.UUID | None = None
     crew_id: uuid.UUID | None = None
     priority: Literal["critical", "high", "normal", "planned"]
-    due_at: datetime
+    due_at: AwareDatetime
     norm_minutes: int | None = Field(default=None, gt=0, le=100_000)
     equipment_stopped: bool = False
     comment: str | None = Field(default=None, max_length=4000)
@@ -146,7 +146,7 @@ class TransitionIn(BaseModel):
 
 class PatchWO(BaseModel):
     priority: Literal["critical", "high", "normal", "planned"] | None = None
-    due_at: datetime | None = None
+    due_at: AwareDatetime | None = None
     comment: str | None = Field(default=None, max_length=4000)
 
     @field_validator("comment", mode="before")
@@ -178,6 +178,19 @@ def _row_to_dict(r: Any) -> dict[str, Any]:
         elif isinstance(v, _D):
             # numeric(...) приходит Decimal: контракт требует JSON-число.
             d[k] = float(v)
+        elif isinstance(v, str) and k in {
+            "equipment",
+            "area",
+            "checks",
+            "strengths",
+            "improvements",
+            "payload",
+            "result",
+            "materials",
+        }:
+            # asyncpg's default json/jsonb codec returns text. Decode only known
+            # structured columns; free-text descriptions must remain untouched.
+            d[k] = json.loads(v)
     return d
 
 
@@ -218,7 +231,7 @@ def _request_hash(method: str, url: str, body: dict[str, Any] | list[Any]) -> st
 
 async def _refresh_status(conn: Any, employee_id: str) -> None:
     cur = await conn.fetchrow(
-        "SELECT current_status FROM employees WHERE id=$1 AND enabled=true", employee_id
+        "SELECT current_status FROM employees WHERE id=$1 AND enabled=true FOR UPDATE", employee_id
     )
     if not cur or cur["current_status"] == "off":
         return
@@ -248,6 +261,45 @@ async def _refresh_status(conn: Any, employee_id: str) -> None:
     )
 
 
+async def _assignment_members(conn: Any, assignee_id: Any, crew_id: Any) -> list[str]:
+    if assignee_id:
+        return [str(assignee_id)]
+    if not crew_id:
+        return []
+    return [
+        str(row["id"])
+        for row in await conn.fetch(
+            "SELECT id FROM employees WHERE crew_id=$1::uuid AND role='worker' AND enabled=true AND deleted_at IS NULL",
+            str(crew_id),
+        )
+    ]
+
+
+async def _validate_assignment(conn: Any, area_id: str, assignee_id: Any, crew_id: Any) -> None:
+    if assignee_id:
+        employee = await conn.fetchrow(
+            """SELECT e.id FROM employees e JOIN employee_areas ea ON ea.employee_id=e.id
+               WHERE e.id=$1::uuid AND e.role='worker' AND e.enabled=true
+               AND e.deleted_at IS NULL AND ea.area_id=$2::uuid""",
+            str(assignee_id),
+            area_id,
+        )
+        if not employee:
+            raise validation_error(
+                [{"path": "assignee_id", "message": "Исполнитель недоступен на выбранном участке"}]
+            )
+    if crew_id:
+        crew = await conn.fetchrow(
+            "SELECT id FROM crews WHERE id=$1::uuid AND area_id=$2::uuid AND deleted_at IS NULL",
+            str(crew_id),
+            area_id,
+        )
+        if not crew:
+            raise validation_error(
+                [{"path": "crew_id", "message": "Бригада не относится к участку оборудования"}]
+            )
+
+
 @router.get("/work-orders")
 async def list_orders(
     request: Request,
@@ -260,8 +312,8 @@ async def list_orders(
     priority: str | None = None,
     status: str | None = None,
     overdue: bool | None = None,
-    from_: str | None = Query(default=None, alias="from"),
-    to: str | None = None,
+    from_: AwareDatetime | None = Query(default=None, alias="from"),
+    to: AwareDatetime | None = None,
     shift: str | None = None,
     kind: str | None = None,
     user: dict[str, Any] = Depends(get_current_user),
@@ -315,7 +367,13 @@ async def list_orders(
         add(lambda p: f"w.issued_at < {p}::timestamptz", to)
     cur = decode_cursor(cursor)
     if cur:
-        params.extend([cur["issued_at"], cur["id"]])
+        try:
+            cursor_time = TypeAdapter(AwareDatetime).validate_python(cur["issued_at"])
+        except ValidationError as exc:
+            raise validation_error(
+                [{"path": "cursor", "message": "Некорректное время курсора"}]
+            ) from exc
+        params.extend([cursor_time, cur["id"]])
         where.append(
             f"(w.issued_at, w.id) < (${len(params) - 1}::timestamptz, ${len(params)}::uuid)"
         )
@@ -381,32 +439,7 @@ async def create_order(
         area_id = str(eq["area_id"])
         if area_id not in user["areaIds"]:
             raise forbidden("Нет доступа к участку оборудования")
-        if body.assignee_id:
-            a = await conn.fetchrow(
-                """SELECT e.id FROM employees e JOIN employee_areas ea ON ea.employee_id=e.id
-                   WHERE e.id=$1 AND e.role='worker' AND e.enabled=true AND e.deleted_at IS NULL AND ea.area_id=$2::uuid""",
-                str(body.assignee_id),
-                area_id,
-            )
-            if not a:
-                raise validation_error(
-                    [
-                        {
-                            "path": "assignee_id",
-                            "message": "Исполнитель недоступен на выбранном участке",
-                        }
-                    ]
-                )
-        if body.crew_id:
-            c = await conn.fetchrow(
-                "SELECT id FROM crews WHERE id=$1 AND area_id=$2::uuid AND deleted_at IS NULL",
-                str(body.crew_id),
-                area_id,
-            )
-            if not c:
-                raise validation_error(
-                    [{"path": "crew_id", "message": "Бригада не относится к участку оборудования"}]
-                )
+        await _validate_assignment(conn, area_id, body.assignee_id, body.crew_id)
         if body.photo_ids:
             n = await conn.fetchval(
                 "SELECT count(*) FROM photos WHERE id = ANY($1::uuid[]) AND author_id=$2 AND kind='before' AND work_order_id IS NULL",
@@ -494,7 +527,7 @@ async def my_orders(
         cursor=cursor,
         area_id=None,
         equipment_id=None,
-        assignee_id=user["id"],
+        assignee_id=None,
         crew_id=None,
         priority=None,
         status=None,
@@ -518,7 +551,7 @@ async def my_active(
         cursor=None,
         area_id=None,
         equipment_id=None,
-        assignee_id=user["id"],
+        assignee_id=None,
         crew_id=None,
         priority=None,
         status="issued,queued,accepted,in_progress,paused,rework",
@@ -544,7 +577,7 @@ async def my_history(
         cursor=None,
         area_id=None,
         equipment_id=None,
-        assignee_id=user["id"],
+        assignee_id=None,
         crew_id=None,
         priority=None,
         status="done,ai_review,closed,cancelled,rejected",
@@ -639,6 +672,14 @@ async def transition(
         raise validation_error([{"path": "priority", "message": "Укажите приоритет"}])
     if body.action == "close" and not body.decision:
         raise validation_error([{"path": "decision", "message": "Укажите решение мастера"}])
+    if (
+        body.action == "close"
+        and body.decision == "override"
+        and (body.score is None or not body.comment)
+    ):
+        raise validation_error(
+            [{"path": "comment", "message": "Для изменения оценки обязательны балл и комментарий"}]
+        )
     if body.action == "complete" and (
         not body.form or not body.form.work_done_text or not body.form.fault_code_id
     ):
@@ -675,6 +716,8 @@ async def transition(
         ):
             raise not_found("Наряд не найден")
         frm, to = o["status"], o["status"]
+        members = await _assignment_members(conn, o.get("assignee_id"), o.get("crew_id"))
+        final_score = None
         reason = None
         if body.action == "accept":
             to = "accepted"
@@ -704,9 +747,13 @@ async def transition(
             reason = r["code"]
             to = {"reject": "rejected", "pause": "paused", "cancel": "cancelled"}[body.action]
             await conn.execute(
-                "UPDATE work_orders SET status=$2, updated_at=now() WHERE id=$1::uuid",
+                """UPDATE work_orders SET status=$2::text::work_order_status,
+                   paused_at=CASE WHEN $2::text='paused' THEN now() ELSE paused_at END,
+                   reject_reason_code=CASE WHEN $2::text='rejected' THEN $3 ELSE reject_reason_code END,
+                   updated_at=now() WHERE id=$1::uuid""",
                 str(order_id),
                 to,
+                reason,
             )
         elif body.action == "start":
             to = "in_progress"
@@ -717,7 +764,10 @@ async def transition(
         elif body.action == "resume":
             to = "in_progress"
             await conn.execute(
-                "UPDATE work_orders SET status='in_progress', paused_at=NULL, updated_at=now() WHERE id=$1::uuid",
+                """UPDATE work_orders SET status='in_progress',
+                   paused_minutes=paused_minutes + CASE WHEN paused_at IS NULL THEN 0
+                     ELSE GREATEST(0, floor(EXTRACT(EPOCH FROM (now()-paused_at))/60))::int END,
+                   paused_at=NULL, updated_at=now() WHERE id=$1::uuid""",
                 str(order_id),
             )
         elif body.action == "complete":
@@ -732,9 +782,10 @@ async def transition(
                 )
             if body.photo_ids:
                 n = await conn.fetchval(
-                    "SELECT count(*) FROM photos WHERE id=ANY($1::uuid[]) AND author_id=$2::uuid AND kind='after'",
+                    "SELECT count(*) FROM photos WHERE id=ANY($1::uuid[]) AND author_id=$2::uuid AND kind='after' AND (work_order_id IS NULL OR work_order_id=$3::uuid)",
                     [str(p) for p in body.photo_ids],
                     user["id"],
+                    str(order_id),
                 )
                 if int(n) != len(body.photo_ids):
                     raise validation_error([{"path": "photo_ids", "message": "Фото недоступно"}])
@@ -776,10 +827,16 @@ async def transition(
                 )
             to = "ai_review"
             await conn.execute(
-                "UPDATE work_orders SET status='ai_review', work_done_text=$2, fault_code_id=$3::uuid, done_at=now(), updated_at=now() WHERE id=$1::uuid",
+                """UPDATE work_orders SET status='ai_review', work_done_text=$2,
+                   fault_code_id=$3::uuid, done_at=now(),
+                   equipment_restored_at=CASE WHEN $4::boolean AND equipment_stopped_at IS NOT NULL
+                     THEN COALESCE(equipment_restored_at,now()) ELSE equipment_restored_at END,
+                   comment=COALESCE($5,comment), updated_at=now() WHERE id=$1::uuid""",
                 str(order_id),
                 body.form.work_done_text,
                 str(body.form.fault_code_id),
+                body.form.equipment_restored is True,
+                body.form.comment or body.comment,
             )
             await conn.execute(
                 "INSERT INTO outbox_events(event, channels, payload) VALUES ('ai.review_requested','{}',$1::jsonb)",
@@ -799,6 +856,10 @@ async def transition(
                 )
                 if not rev:
                     raise conflict("ai_review_missing", "Результат проверки ИИ ещё не готов")
+                if o.get("done_at") and rev.get("created_at") and rev["created_at"] < o["done_at"]:
+                    raise conflict(
+                        "ai_review_missing", "Проверка повторного выполнения ещё не готова"
+                    )
                 score = (
                     body.score
                     if body.decision == "override"
@@ -808,6 +869,20 @@ async def transition(
                     raise validation_error(
                         [{"path": "score", "message": "Укажите итоговую оценку"}]
                     )
+                if (
+                    body.decision == "agree_ai"
+                    and body.score is not None
+                    and body.score != rev["score"]
+                ):
+                    raise validation_error(
+                        [
+                            {
+                                "path": "decision",
+                                "message": "Для изменения оценки выберите решение «Изменить»",
+                            }
+                        ]
+                    )
+                final_score = int(score)
                 await conn.execute(
                     "UPDATE ai_reviews SET master_decision=$2, master_score=$3, master_comment=$4, decided_by=$5::uuid, decided_at=now() WHERE id=$1",
                     rev["id"],
@@ -818,6 +893,11 @@ async def transition(
                 )
                 if body.decision == "agree_ai" and rev["verdict"] == "needs_rework":
                     to = "rework"
+                    if frm != "rework":
+                        await conn.execute(
+                            "UPDATE work_orders SET status='rework', return_count=return_count+1, updated_at=now() WHERE id=$1::uuid",
+                            str(order_id),
+                        )
                 else:
                     to = "closed"
                     await conn.execute(
@@ -830,9 +910,13 @@ async def transition(
                         json.dumps({"id": str(order_id)}),
                     )
         elif body.action == "reassign":
+            await _validate_assignment(conn, str(o["area_id"]), body.assignee_id, body.crew_id)
+            members.extend(await _assignment_members(conn, body.assignee_id, body.crew_id))
             to = "issued"
             await conn.execute(
-                "UPDATE work_orders SET status='issued', assignee_id=$2::uuid, crew_id=$3::uuid, accepted_at=NULL, started_at=NULL, updated_at=now() WHERE id=$1::uuid",
+                """UPDATE work_orders SET status='issued', assignee_id=$2::uuid, crew_id=$3::uuid,
+                   accepted_at=NULL, started_at=NULL, paused_at=NULL, queue_position=NULL,
+                   reject_reason_code=NULL, updated_at=now() WHERE id=$1::uuid""",
                 str(order_id),
                 str(body.assignee_id) if body.assignee_id else None,
                 str(body.crew_id) if body.crew_id else None,
@@ -849,17 +933,34 @@ async def transition(
             user["id"],
             body.action,
             reason,
-            body.comment,
+            body.comment or (body.form.comment if body.form else None),
             json.dumps({"from": frm, "to": to}),
         )
         await conn.execute(
             "INSERT INTO outbox_events(event, channels, payload) VALUES ('order.transition',$1,$2::jsonb)",
-            ["shift:current", f"order:{order_id}"],
-            json.dumps({"id": str(order_id), "from": frm, "to": to, "actor_id": user["id"]}),
+            ["shift:current", f"order:{order_id}"]
+            + [f"user:{uid}" for uid in dict.fromkeys(members)],
+            json.dumps(
+                {
+                    "id": str(order_id),
+                    "from": frm,
+                    "to": to,
+                    "action": body.action,
+                    "actor_id": user["id"],
+                }
+            ),
         )
+        for employee_id in sorted(set(members)):
+            await _refresh_status(conn, employee_id)
         return {
             "statusCode": 200,
-            "body": {"id": str(order_id), "from": frm, "to": to, "action": body.action},
+            "body": {
+                "id": str(order_id),
+                "from": frm,
+                "to": to,
+                "action": body.action,
+                **({"score": final_score} if body.action == "close" else {}),
+            },
         }
 
     res = await run_idempotent(key, user["id"], h, action)
@@ -936,60 +1037,21 @@ async def review_decision(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     require_role(user, "master")
-    await assert_can_read_order(user, str(order_id))
-    if body.decision == "override" and (body.score is None or not body.comment):
-        raise validation_error(
-            [{"path": "comment", "message": "Для изменения оценки обязательны балл и комментарий"}]
-        )
-    key = request.headers.get("idempotency-key") or f"auto-{uuid.uuid4()}"
-    h = _request_hash(
-        "POST", f"/work-orders/{order_id}/review/decision", body.model_dump(mode="json")
+    # Use the same locked state machine, audit, outbox and idempotency path as
+    # /transitions. A second API route must not bypass terminal-state checks.
+    result = await transition(
+        order_id,
+        TransitionIn(action="close", **body.model_dump()),
+        request,
+        user,
     )
-
-    async def action(conn: Any) -> dict[str, Any]:
-        rev = await conn.fetchrow(
-            "SELECT * FROM ai_reviews WHERE work_order_id=$1::uuid ORDER BY attempt DESC LIMIT 1 FOR UPDATE",
-            str(order_id),
-        )
-        if not rev:
-            raise conflict("ai_review_missing", "Результат проверки ИИ ещё не готов")
-        score = (
-            body.score
-            if body.decision == "override"
-            else (body.score if body.score is not None else rev["score"])
-        )
-        if score is None:
-            raise validation_error([{"path": "score", "message": "Укажите итоговую оценку"}])
-        await conn.execute(
-            "UPDATE ai_reviews SET master_decision=$2, master_score=$3, master_comment=$4, decided_by=$5::uuid, decided_at=now() WHERE id=$1",
-            rev["id"],
-            body.decision,
-            int(score),
-            body.comment,
-            user["id"],
-        )
-        to = (
-            "rework"
-            if (body.decision == "agree_ai" and rev["verdict"] == "needs_rework")
-            else "closed"
-        )
-        if to == "closed":
-            await conn.execute(
-                "UPDATE work_orders SET status='closed', closed_at=now(), updated_at=now() WHERE id=$1::uuid",
-                str(order_id),
-            )
-        return {
-            "statusCode": 200,
-            "body": {
-                "id": str(order_id),
-                "status": to,
-                "decision": body.decision,
-                "score": int(score),
-            },
-        }
-
-    res = await run_idempotent(key, user["id"], h, action)
-    return {**res["body"], "replayed": res["replayed"]}
+    return {
+        "id": result["id"],
+        "status": result["to"],
+        "decision": body.decision,
+        "score": result["score"],
+        "replayed": result["replayed"],
+    }
 
 
 @router.post("/work-orders/{order_id}/materials", status_code=201)
@@ -1015,6 +1077,10 @@ async def add_materials(
             raise conflict(
                 "invalid_transition", "Материалы можно добавить только к наряду в работе"
             )
+        if str(o.get("assignee_id") or "") != user["id"] and not (
+            user["crewId"] and str(o.get("crew_id") or "") == user["crewId"]
+        ):
+            raise not_found("Наряд не найден")
         for m in body:
             u = await conn.fetchrow(
                 "SELECT unit FROM materials WHERE id=$1::uuid AND deleted_at IS NULL",
@@ -1275,7 +1341,7 @@ async def similar_repairs(
                             FROM material_writeoffs mw JOIN materials m ON m.id=mw.material_id
                             WHERE mw.work_order_id=w.id), '[]'::json) AS materials
            FROM work_orders w LEFT JOIN fault_codes fc ON fc.id=w.fault_code_id
-           WHERE w.equipment_id=$1::uuid AND w.status = ANY($2::text[])
+           WHERE w.equipment_id=$1::uuid AND w.status = ANY($2::work_order_status[])
            ORDER BY w.closed_at DESC NULLS LAST, w.issued_at DESC, w.id DESC LIMIT 50""",
         str(equipment_id),
         list(CLOSED_REPAIR_STATUSES),

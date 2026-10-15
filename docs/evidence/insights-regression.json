@@ -1,0 +1,12 @@
+{
+  "status": "PASS",
+  "database": "PostgreSQL temporary tables, rolled back",
+  "checks": [
+    "Pending planned work cannot imply completed maintenance",
+    "Post-PPR window uses completion time",
+    "Master cannot see employee aggregate spanning another area",
+    "Master owning all employee areas can see aggregate",
+    "Empty master scope returns no employee aggregates",
+    "Manager global aggregate remains available"
+  ]
+}

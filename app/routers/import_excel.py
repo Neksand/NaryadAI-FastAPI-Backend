@@ -65,6 +65,14 @@ def parse_import_workbook(
     Каждая ошибка — dict с ключами row/path/message.
     Невалидный файл -> ValueError (HTTP-слой превращает в 422).
     """
+    rows, errors, _ = _parse_import_workbook(data, ctype)
+    return rows, errors
+
+
+def _parse_import_workbook(
+    data: bytes, ctype: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[int]]:
+    """Keep source row numbers internally for database-reference validation."""
     if ctype not in IMPORTABLE_TYPES:
         raise ValueError(f"Неизвестный справочник: {ctype}")
     if not data:
@@ -101,9 +109,10 @@ def parse_import_workbook(
         if col not in header:
             errors.append(_err(1, col, f"Нет обязательной колонки: {col}"))
     if errors:
-        return [], errors
+        return [], errors, []
 
     rows: list[dict[str, Any]] = []
+    source_rows: list[int] = []
     seen_keys: set[Any] = set()
     seen_qr: set[Any] = set()
     key_col = UNIQUE_COLUMN[ctype]
@@ -138,7 +147,7 @@ def parse_import_workbook(
             area = record.get("area_id")
             if area is not None:
                 try:
-                    uuid.UUID(str(area))
+                    record["area_id"] = str(uuid.UUID(str(area)))
                 except ValueError:
                     row_errors.append(_err(excel_row, "area_id", "area_id должен быть UUID"))
             qr = record.get("qr_token")
@@ -169,7 +178,31 @@ def parse_import_workbook(
             errors.extend(row_errors)
         else:
             rows.append(record)
-    return rows, errors
+            source_rows.append(excel_row)
+    return rows, errors, source_rows
+
+
+async def _validate_areas(
+    connection: Any,
+    rows: list[dict[str, Any]],
+    source_rows: list[int],
+    *,
+    lock: bool = False,
+) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    area_ids = sorted({record["area_id"] for record in rows})
+    # Apply validates under the same transaction and locks referenced rows so
+    # deletion/soft deletion cannot race between validation and insertion.
+    query = "SELECT id FROM areas WHERE id=ANY($1::uuid[]) AND deleted_at IS NULL"
+    if lock:
+        query += " FOR SHARE"
+    existing = {str(row["id"]) for row in await connection.fetch(query, area_ids)}
+    return [
+        _err(source_row, "area_id", "Участок не найден или удалён")
+        for record, source_row in zip(rows, source_rows, strict=True)
+        if record["area_id"] not in existing
+    ]
 
 
 @router.post("/dict/{ctype}/import")
@@ -184,10 +217,12 @@ async def import_dict(
         raise not_found("Справочник не найден")
     content = await file.read()
     try:
-        rows, errors = parse_import_workbook(content, ctype)
+        rows, errors, source_rows = _parse_import_workbook(content, ctype)
     except ValueError as e:
         raise validation_error([{"path": "file", "message": str(e)}]) from e
     if dry_run:
+        if ctype == "equipment" and rows:
+            errors.extend(await _validate_areas(await get_pool(), rows, source_rows))
         return {"rows": rows, "errors": errors}
     if errors:
         raise validation_error(errors)
@@ -200,6 +235,10 @@ async def import_dict(
     created = 0
     updated = 0
     async with pool.acquire() as conn, conn.transaction():
+        if ctype == "equipment":
+            reference_errors = await _validate_areas(conn, rows, source_rows, lock=True)
+            if reference_errors:
+                raise validation_error(reference_errors)
         for record in rows:
             existing = await conn.fetchrow(
                 f"SELECT id FROM {table} WHERE {key_col}=$1", record.get(key_col)

@@ -148,7 +148,10 @@ def test_patterns_downtime_materials_and_work_order_status_endpoints(api):
     pool.rows = [{"name": "Filter", "qty": 2.5}]
     pool.materials = [{"name": "Filter", "qty": 2.5}]
     client, _, _ = api(pool)
+    material_rows = pool.rows
+    pool.rows = []
     assert client.get("/api/v1/analytics/patterns").json() == {"items": []}
+    pool.rows = material_rows
     assert client.get("/api/v1/analytics/downtime").json()["downtime_hours"] == 1.75
     assert client.get("/api/v1/analytics/materials").json()["items"][0]["qty"] == 2.5
     assert client.get("/api/v1/analytics/work-orders").status_code == 200
@@ -163,7 +166,7 @@ def test_insights_filters_serialize_uuid_and_status_patch_validates(api):
     client, _, _ = api(pool)
     response = client.get("/api/v1/analytics/insights", params={"status": "new"})
     assert response.json()["items"][0]["id"] == str(insight_id)
-    assert pool.fetch_calls[-1][1] == ("new",)
+    assert pool.fetch_calls[-1][1] == ("new", None)
     assert (
         client.patch(f"/api/v1/analytics/insights/{insight_id}", json={"status": "bad"}).status_code
         == 422
@@ -236,7 +239,7 @@ def test_worker_rating_is_limited_to_self_and_returns_formula_components(api):
     assert data["rejected"] == 0.05
     query, args = pool.fetch_calls[-1]
     assert "($3::uuid IS NULL OR w.assignee_id = $3::uuid)" in query
-    assert args == (None, None, user["id"])
+    assert args == (None, None, user["id"], None)
 
     assert client.get(f"/api/v1/analytics/ratings/{uuid.uuid4()}").status_code == 403
     assert client.get("/api/v1/analytics/ratings", params={"group_by": "crew"}).status_code == 403
@@ -258,7 +261,7 @@ def test_analytics_sql_identifiers_are_whitelisted_and_values_stay_bound(api):
     client.get("/api/v1/analytics/insights", params={"status": status})
     query, args = pool.fetch_calls[-1]
     assert status not in query
-    assert args == (status,)
+    assert args == (status, None)
 
 
 ANALYTICS_FILTER_ATTACKS = [
@@ -328,7 +331,7 @@ def test_faults_and_insights_alias_forward_parameters(api):
         "/api/v1/analytics/faults", params={"from": "2026-02-01", "to": "2026-03-01", "limit": 5}
     )
     assert faults.json()["data"] == pool.rows
-    assert pool.fetch_calls[-1][1] == ("2026-02-01", "2026-03-01", 5)
+    assert pool.fetch_calls[-1][1] == ("2026-02-01", "2026-03-01", 5, None)
     pool.rows = [{"id": uuid.uuid4(), "status": "seen"}]
     assert client.get("/api/v1/analytics/ai-insights", params={"status": "seen"}).status_code == 200
 
@@ -420,6 +423,8 @@ def test_plan_order_validates_exactly_one_assignee_and_creates_idempotent_order(
                 }
             if "FROM equipment" in query:
                 return {"area_id": area_id}
+            if "FROM employees" in query:
+                return {"id": assignee_id}
             if "INSERT INTO work_orders" in query:
                 return {"id": order_id}
             return None
@@ -430,6 +435,12 @@ def test_plan_order_validates_exactly_one_assignee_and_creates_idempotent_order(
         async def execute(self, query, *args):
             self.calls.append((query, args))
 
+    from unittest.mock import AsyncMock
+
+    from app.routers import work_orders
+
+    refresh_status = AsyncMock()
+    monkeypatch.setattr(work_orders, "_refresh_status", refresh_status)
     client, _, user = api()
     invalid = client.post(
         f"/api/v1/analytics/insights/{insight_id}/plan-order", json={"due_at": "2026-11-01"}
@@ -460,3 +471,42 @@ def test_plan_order_validates_exactly_one_assignee_and_creates_idempotent_order(
         user["id"],
     )
     assert any("UPDATE insights SET status='in_plan'" in query for query, _ in conn.calls)
+    refresh_status.assert_awaited_once_with(conn, str(assignee_id))
+
+
+@pytest.mark.parametrize("endpoint", ["dashboard", "work-orders", "ratings", "quality", "faults"])
+def test_analytics_invalid_date_filters_return_422_before_database(api, endpoint):
+    client, pool, _ = api()
+    assert (
+        client.get(f"/api/v1/analytics/{endpoint}", params={"from": "not-a-date"}).status_code
+        == 422
+    )
+    assert (
+        client.get(
+            f"/api/v1/analytics/{endpoint}", params={"from": "2026-10-20", "to": "2026-10-01"}
+        ).status_code
+        == 422
+    )
+    assert not pool.fetch_calls and not pool.fetchrow_calls
+
+
+def test_master_cannot_read_other_area_details(api):
+    client, pool, _ = api(role="master", areaIds=[str(uuid.uuid4())])
+    assert client.get(f"/api/v1/analytics/areas/{uuid.uuid4()}").status_code == 403
+    assert not pool.fetchrow_calls
+
+
+def test_patterns_returns_computed_insights_instead_of_placeholder(api):
+    pool = AnalyticsPool()
+    pool.rows = [
+        {
+            "id": uuid.uuid4(),
+            "headline": "Computed finding",
+            "scope": '{"equipment_id":"test"}',
+            "evidence": '[{"metric":"count","value":12}]',
+        }
+    ]
+    client, _, _ = api(pool)
+    result = client.get("/api/v1/analytics/patterns").json()["items"][0]
+    assert result["scope"] == {"equipment_id": "test"}
+    assert result["evidence"][0]["value"] == 12

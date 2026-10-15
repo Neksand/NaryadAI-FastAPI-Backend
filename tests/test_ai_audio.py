@@ -35,6 +35,7 @@ class FakeAsyncClient:
 
 def _settings(**overrides):
     defaults = {
+        "AI_EXTERNAL_ENABLED": True,
         "AI_AUDIO_PROVIDER": "off",
         "GROQ_API_KEY": "test-key",
         "GROQ_WHISPER_MODEL": "whisper-test",
@@ -163,3 +164,20 @@ def test_unknown_audio_provider_fails_closed_without_network(monkeypatch):
     )
 
     assert asyncio.run(ai_providers.transcribe_audio(b"wav")) == (None, "local")
+
+
+def test_hosted_audio_requires_explicit_data_export_opt_in(monkeypatch):
+    monkeypatch.setattr(
+        ai_providers,
+        "_settings",
+        lambda: _settings(AI_AUDIO_PROVIDER="groq", AI_EXTERNAL_ENABLED=False),
+    )
+    monkeypatch.setattr(
+        ai_providers.httpx,
+        "AsyncClient",
+        lambda **_: pytest.fail("Unapproved audio must not leave the system"),
+    )
+    assert asyncio.run(ai_providers.transcribe_audio(b"audio", "audio.wav", "audio/wav")) == (
+        None,
+        "groq-whisper",
+    )

@@ -4,10 +4,12 @@ No DB/Redis/S3. Sync tests only (async via asyncio.run).
 """
 
 import asyncio
+import io
 import uuid
 from datetime import UTC, datetime
 
 import pytest
+from PIL import Image
 
 
 def run(coro):
@@ -112,7 +114,7 @@ def test_insights_none_status_returns_rows(monkeypatch):
 
     class _Pool:
         async def fetch(self, query, *args):
-            assert args == (None,)
+            assert args == (None, None)
             return [{"id": iid, "status": "new"}]
 
     async def fake_pool():
@@ -128,7 +130,7 @@ def test_insights_valid_status_passes_filter(monkeypatch):
 
     class _Pool:
         async def fetch(self, query, *args):
-            assert args == ("seen",)
+            assert args == ("seen", None)
             return []
 
     async def fake_pool():
@@ -727,7 +729,9 @@ def test_parse_taken_at_zone_bounds():
 
 # --- photos._create_photo (413, standalone, forbidden 141-143, dup, limit, cleanup) ---
 
-_JPEG = bytes([0xFF, 0xD8, 0xFF]) + b"0" * 64
+_image_buffer = io.BytesIO()
+Image.new("RGB", (12, 12), (100, 20, 30)).save(_image_buffer, format="JPEG")
+_JPEG = _image_buffer.getvalue()
 
 
 class _PhotoPool:

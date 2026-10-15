@@ -74,6 +74,9 @@ class Pool:
         self.materials = []
         self.events = []
         self.employees = []
+        self.assignable_employee = {"id": WORKER_ID}
+        self.assignable_crew = {"id": str(uuid.uuid4())}
+        self.employee_status = None
         self.review = {"id": "review-1", "score": 90, "verdict": "accepted", "master_score": None}
         self.reason = {"code": "valid_reason"}
         self.fault = {"id": FAULT_ID}
@@ -108,6 +111,12 @@ class Pool:
             return self.fault
         if "FROM materials" in query:
             return self.material
+        if "JOIN employee_areas" in query:
+            return self.assignable_employee
+        if "FROM crews" in query:
+            return self.assignable_crew
+        if "SELECT current_status FROM employees" in query:
+            return {"current_status": self.employee_status} if self.employee_status else None
         if "FROM equipment" in query:
             return {"id": self.details["equipment_id"], "area_id": self.order["area_id"]}
         if "FROM work_orders" in query:
@@ -122,6 +131,8 @@ class Pool:
             return self.materials
         if "FROM work_order_events" in query:
             return self.events
+        if "SELECT id, number, status FROM work_orders" in query:
+            return self.rows
         if "FROM employees" in query:
             return self.employees
         return self.rows
@@ -228,7 +239,7 @@ def test_work_order_listing_applies_filters_and_returns_stable_cursor(api):
         "w.issued_at, w.id",
     ):
         assert fragment in query
-    assert args[-3:] == (issued.isoformat(), cursor_id, 2)
+    assert args[-3:] == (issued, cursor_id, 2)
     decoded = work_orders.decode_cursor(body["next_cursor"])
     assert decoded["id"] == str(pool.rows[0]["id"])
 
@@ -531,6 +542,7 @@ def test_review_decision_validates_override_and_records_human_decision(api):
     assert invalid.status_code == 422
 
     pool.review = {"id": "review-3", "score": 90, "verdict": "accepted"}
+    pool.order["status"] = "ai_review"
     with client_factory(role="master") as client:
         valid = client.post(
             f"/api/v1/work-orders/{ORDER_ID}/review/decision",
@@ -599,3 +611,203 @@ def test_shift_board_summary_and_equipment_history_respect_role_scope(api):
     with client_factory(role="master", areaIds=[str(uuid.uuid4())]) as other_master:
         hidden_history = other_master.get(f"/api/v1/equipment/{equipment_id}/history")
     assert hidden_history.status_code == 404
+
+
+@pytest.mark.parametrize("suffix", ["", "/active", "/history"])
+def test_my_orders_keep_crew_assignments_in_worker_scope(api, suffix):
+    pool, client_factory = api
+    crew_id = str(uuid.uuid4())
+    with client_factory(role="worker", crewId=crew_id) as client:
+        response = client.get(f"/api/v1/work-orders/my{suffix}")
+    assert response.status_code == 200
+    query, args = pool.fetch_calls[-1]
+    assert "w.crew_id = $2::uuid" in query
+    assert "AND w.assignee_id =" not in query
+    assert args[:2] == (WORKER_ID, crew_id)
+
+
+@pytest.mark.parametrize("field", ["assignee_id", "crew_id"])
+def test_reassignment_rejects_invalid_or_out_of_area_target(api, field):
+    pool, client_factory = api
+    pool.assignable_employee = None
+    pool.assignable_crew = None
+    with client_factory() as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/transitions",
+            json={"action": "reassign", field: str(uuid.uuid4())},
+        )
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["path"] == field
+    assert pool.conn.executions == []
+
+
+@pytest.mark.parametrize("state", ["issued", "in_progress", "cancelled", "closed"])
+def test_review_decision_cannot_bypass_state_machine(api, state):
+    pool, client_factory = api
+    pool.order["status"] = state
+    with client_factory() as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/review/decision",
+            json={"decision": "agree_ai"},
+        )
+    assert response.status_code == 409
+    assert pool.conn.executions == []
+
+
+def test_review_decision_records_history_and_notification_action(api):
+    pool, client_factory = api
+    pool.order["status"] = "ai_review"
+    with client_factory() as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/review/decision",
+            json={"decision": "agree_ai"},
+        )
+    assert response.status_code == 200
+    assert response.json()["score"] == 90
+    event = next(
+        args for query, args in pool.conn.executions if "INSERT INTO work_order_events" in query
+    )
+    assert event[2] == "close"
+    payload = next(
+        args[-1] for query, args in pool.conn.executions if "'order.transition'" in query
+    )
+    assert json.loads(payload)["action"] == "close"
+
+
+def test_agree_with_ai_rework_persists_state_instead_of_only_returning_it(api):
+    pool, client_factory = api
+    pool.order["status"] = "ai_review"
+    pool.review.update(verdict="needs_rework", score=40)
+    with client_factory() as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/review/decision", json={"decision": "agree_ai"}
+        )
+    assert response.status_code == 200 and response.json()["status"] == "rework"
+    assert any(
+        "UPDATE work_orders SET status='rework'" in query for query, _ in pool.conn.executions
+    )
+
+
+def test_start_refreshes_worker_availability_and_typed_notification(api):
+    pool, client_factory = api
+    pool.order["status"] = "accepted"
+    pool.employee_status = "queue"
+    pool.rows = [{"id": ORDER_ID, "number": 42, "status": "in_progress"}]
+    with client_factory(role="worker") as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/transitions", json={"action": "start"}
+        )
+    assert response.status_code == 200
+    status_update = next(
+        args
+        for query, args in pool.conn.executions
+        if "UPDATE employees SET current_status" in query
+    )
+    assert status_update == (WORKER_ID, "busy")
+    payload = next(
+        args[-1] for query, args in pool.conn.executions if "'order.transition'" in query
+    )
+    assert json.loads(payload)["action"] == "start"
+
+
+def test_complete_persists_equipment_restoration_and_comment(api):
+    pool, client_factory = api
+    pool.order["status"] = "in_progress"
+    with client_factory(role="worker") as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/transitions",
+            json={
+                "action": "complete",
+                "form": {
+                    "work_done_text": "Заменено уплотнение",
+                    "fault_code_id": FAULT_ID,
+                    "equipment_restored": True,
+                    "comment": "Оборудование проверено",
+                },
+            },
+        )
+    assert response.status_code == 200
+    query, args = next(
+        (query, args)
+        for query, args in pool.conn.executions
+        if "UPDATE work_orders SET status='ai_review'" in query
+    )
+    assert "equipment_restored_at" in query
+    assert args[-2:] == (True, "Оборудование проверено")
+
+
+def test_patch_naive_deadline_returns_validation_error_instead_of_500(api):
+    _, client_factory = api
+    with client_factory() as client:
+        response = client.patch(
+            f"/api/v1/work-orders/{ORDER_ID}", json={"due_at": "2099-01-01T10:00:00"}
+        )
+    assert response.status_code == 422
+
+
+def test_close_override_requires_explanation_on_both_routes(api):
+    pool, client_factory = api
+    pool.order["status"] = "ai_review"
+    with client_factory() as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/transitions",
+            json={"action": "close", "decision": "override", "score": 99},
+        )
+    assert response.status_code == 422
+    assert pool.conn.executions == []
+
+
+def test_close_cannot_use_review_from_before_latest_completion(api):
+    pool, client_factory = api
+    pool.order.update(status="ai_review", done_at=datetime(2026, 1, 2, tzinfo=UTC))
+    pool.review["created_at"] = datetime(2026, 1, 1, tzinfo=UTC)
+    with client_factory() as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/review/decision", json={"decision": "agree_ai"}
+        )
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "ai_review_missing"
+    assert pool.conn.executions == []
+
+
+def test_add_materials_rechecks_assignment_under_row_lock(api):
+    pool, client_factory = api
+    pool.order.update(status="in_progress", assignee_id=str(uuid.uuid4()))
+    with client_factory(role="worker") as client:
+        response = client.post(
+            f"/api/v1/work-orders/{ORDER_ID}/materials",
+            json=[{"material_id": MATERIAL_ID, "quantity": 1}],
+        )
+    assert response.status_code == 404
+    assert pool.conn.executions == []
+
+
+@pytest.mark.parametrize("timestamp", ["not-a-date", "2099-01-01T10:00:00"])
+def test_invalid_timestamp_in_cursor_returns_422_before_database_query(api, timestamp):
+    pool, client_factory = api
+    cursor = work_orders.encode_cursor(ORDER_ID, timestamp)
+    with client_factory() as client:
+        response = client.get("/api/v1/work-orders", params={"cursor": cursor})
+    assert response.status_code == 422
+    assert pool.fetch_calls == []
+
+
+def test_full_card_and_review_decode_real_asyncpg_jsonb_shapes(api):
+    pool, client_factory = api
+    pool.details.update(
+        equipment='{"id":"equipment","name":"Насос"}', area='{"id":"area","name":"Цех"}'
+    )
+    pool.review.update(
+        checks='{"completeness":{"pass":true}}', strengths='["полнота"]', improvements="[]"
+    )
+    pool.events = [{"payload": '{"from":"issued","to":"accepted"}'}]
+    with client_factory() as client:
+        detail = client.get(f"/api/v1/work-orders/{ORDER_ID}").json()
+        review = client.get(f"/api/v1/work-orders/{ORDER_ID}/ai-review").json()
+        events = client.get(f"/api/v1/work-orders/{ORDER_ID}/events").json()
+    assert detail["equipment"]["name"] == "Насос"
+    assert detail["area"]["name"] == "Цех"
+    assert detail["ai_review"]["strengths"] == ["полнота"]
+    assert review["improvements"] == []
+    assert review["checks"]["completeness"]["pass"] is True
+    assert events["items"][0]["payload"]["to"] == "accepted"

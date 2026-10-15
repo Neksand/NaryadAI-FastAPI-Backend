@@ -157,3 +157,64 @@ def test_unknown_action_and_database_notification_socket_failures_are_nonfatal(m
         )
     )
     assert no_order == ("DEADLINE_EXCEEDED", [])
+
+
+def test_reassignment_notifies_new_assignee_not_previous_subscriber(monkeypatch):
+    sent, _ = patch_fanout(monkeypatch)
+    order = {
+        "id": "order",
+        "number": 9,
+        "master_id": "master",
+        "assignee_id": "new-worker",
+        "crew_id": None,
+    }
+    run(
+        background._notify_for_event(
+            Conn(order),
+            "order.transition",
+            {"id": "order", "action": "reassign"},
+            ["user:old-worker", "user:new-worker"],
+        )
+    )
+    assert sent[0][0] == ["new-worker"]
+
+
+def test_ai_review_notifies_entire_assigned_crew(monkeypatch):
+    sent, _ = patch_fanout(monkeypatch)
+    order = {
+        "id": "order",
+        "number": 9,
+        "master_id": "master",
+        "assignee_id": None,
+        "crew_id": "crew",
+    }
+
+    class CrewConn(Conn):
+        async def fetch(self, query, *args):
+            assert "enabled=true" in query
+            return [{"id": "worker-1"}, {"id": "worker-2"}]
+
+    run(
+        background._notify_for_event(
+            CrewConn(order), "order.ai_review_ready", {"id": "order"}, ["order:order"]
+        )
+    )
+    assert sent[0][0] == ["master", "worker-1", "worker-2"]
+
+
+def test_master_agreement_with_rework_emits_rework_not_closed(monkeypatch):
+    sent, _ = patch_fanout(monkeypatch)
+    order = {
+        "id": "order",
+        "number": 9,
+        "master_id": "master",
+        "assignee_id": "worker",
+        "crew_id": None,
+    }
+    result = run(
+        background._notify_for_event(
+            Conn(order), "order.transition", {"id": "order", "action": "close", "to": "rework"}, []
+        )
+    )
+    assert result[0] == "WORK_ORDER_REWORK"
+    assert sent[0][1] == "WORK_ORDER_REWORK"

@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse
 from app.config import settings
 from app.db import close_pool, get_pool
 from app.errors import AppError
+from app.logging_utils import install_auth_redaction
 from app.routers import (
     admin,
     ai,
@@ -48,6 +49,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
 
 def create_app() -> FastAPI:
+    install_auth_redaction()
     app = FastAPI(title="НарядAI API", version="1.0.0", lifespan=lifespan)
 
     app.add_middleware(

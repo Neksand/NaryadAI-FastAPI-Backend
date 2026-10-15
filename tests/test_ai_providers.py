@@ -17,6 +17,7 @@ def run(coro):
 
 def settings(**overrides):
     defaults = {
+        "AI_EXTERNAL_ENABLED": True,
         "AI_TEXT_PROVIDER": "off",
         "AI_VISION_PROVIDER": "off",
         "GEMINI_API_KEY": "gemini-key",
@@ -314,6 +315,8 @@ def test_estimin3n_photo_provider_reports_result_and_failure(monkeypatch):
 def test_photo_gemini_encodes_both_images_and_parses_result(monkeypatch):
     from app.config import settings as real_settings
 
+    monkeypatch.setattr(real_settings, "AI_EXTERNAL_ENABLED", True)
+
     monkeypatch.setattr(real_settings, "AI_VISION_PROVIDER", "gemini")
     monkeypatch.setattr(real_settings, "GEMINI_API_KEY", "key")
     monkeypatch.setattr(real_settings, "GEMINI_MODEL", "vision-test")
@@ -597,3 +600,49 @@ def test_local_model_loader_rejects_4bit_without_cuda(monkeypatch):
 
     with pytest.raises(ValueError, match="requires CUDA"):
         ai_providers._estimin3n_runtime()
+
+
+@pytest.mark.parametrize("provider", ["auto", "gemini", "openrouter", "groq", "pollinations"])
+def test_hosted_text_requires_explicit_data_export_opt_in(monkeypatch, provider):
+    monkeypatch.setattr(
+        ai_providers,
+        "_settings",
+        lambda: settings(AI_TEXT_PROVIDER=provider, AI_EXTERNAL_ENABLED=False),
+    )
+
+    async def forbidden(*_args):
+        pytest.fail("Unapproved employee data must not leave the system")
+
+    monkeypatch.setattr(ai_providers, "_gemini_text", forbidden)
+    monkeypatch.setattr(ai_providers, "_openai_compat_text", forbidden)
+    monkeypatch.setattr(ai_providers, "_pollinations_text", forbidden)
+    assert run(ai_providers.chat_text("repair", "employee free text")) == (None, "local")
+
+
+def test_auto_text_never_uses_unconfigured_public_provider(monkeypatch):
+    monkeypatch.setattr(ai_providers, "_settings", lambda: settings(AI_TEXT_PROVIDER="auto"))
+
+    async def empty(*_args):
+        return None
+
+    async def forbidden(*_args):
+        pytest.fail("Pollinations must only run when explicitly selected")
+
+    monkeypatch.setattr(ai_providers, "_gemini_text", empty)
+    monkeypatch.setattr(ai_providers, "_openai_compat_text", empty)
+    monkeypatch.setattr(ai_providers, "_pollinations_text", forbidden)
+    assert run(ai_providers.chat_text("repair", "description")) == (None, "local")
+
+
+def test_hosted_vision_requires_explicit_data_export_opt_in(monkeypatch):
+    from app.config import settings as real_settings
+
+    monkeypatch.setattr(real_settings, "AI_VISION_PROVIDER", "gemini")
+    monkeypatch.setattr(real_settings, "GEMINI_API_KEY", "configured")
+    monkeypatch.setattr(real_settings, "AI_EXTERNAL_ENABLED", False)
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("Unapproved photos must not leave the system")
+
+    monkeypatch.setattr(ai_providers, "_post_json", forbidden)
+    assert run(ai_providers.compare_photos(b"before", b"after", "description")) == (None, "local")

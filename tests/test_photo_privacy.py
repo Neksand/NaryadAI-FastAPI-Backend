@@ -111,7 +111,7 @@ def test_jpeg_upload_stores_stripped_bytes_and_taken_at(api):
         assert exif.get(271) is None
         assert exif.get(272) is None
         assert exif.get(34853) is None
-    assert pool.inserts[0][8] == datetime(2026, 10, 13, 11, 22, 33, tzinfo=UTC)
+    assert pool.inserts[0][8] is None  # No EXIF offset: do not invent a UTC instant.
 
 
 def test_png_upload_passes_through_unchanged(api):
@@ -133,3 +133,59 @@ def test_invalid_bytes_fall_back_as_before():
     assert photos._exif_taken_at(garbage) is None
     with pytest.raises(Exception):
         photos._verify(garbage, "image/png")
+
+
+def test_exif_offset_original_is_converted_to_utc():
+    image = Image.new("RGB", (16, 12), (90, 140, 210))
+    exif = Image.Exif()
+    exif[36867] = "2026:10:13 11:22:33"
+    exif[36881] = "+05:00"
+    output = io.BytesIO()
+    image.save(output, format="JPEG", exif=exif)
+    assert photos._exif_taken_at(output.getvalue()) == datetime(2026, 10, 13, 6, 22, 33, tzinfo=UTC)
+
+
+def test_naive_exif_uses_explicit_client_offset_instead_of_assuming_utc(api):
+    client, _, pool = api
+    response = client.post(
+        "/api/v1/photos",
+        data={"kind": "before", "taken_at": "2026-10-13T11:22:33+05:00"},
+        files={"file": ("photo.jpg", jpeg_with_exif(), "image/jpeg")},
+    )
+    assert response.status_code == 200
+    assert pool.inserts[0][8] == datetime(2026, 10, 13, 6, 22, 33, tzinfo=UTC)
+
+
+@pytest.mark.parametrize(
+    ("mime", "payload"),
+    [
+        ("image/jpeg", b"\xff\xd8\xffnot-an-image"),
+        ("image/png", b"\x89PNG\r\n\x1a\nnot-an-image"),
+        ("image/webp", b"RIFF\x00\x00\x00\x00WEBPnot-an-image"),
+    ],
+)
+def test_magic_header_alone_is_rejected_before_any_storage_write(api, mime, payload):
+    client, puts, pool = api
+    response = client.post(
+        "/api/v1/photos", data={"kind": "before"}, files={"file": ("photo", payload, mime)}
+    )
+    assert response.status_code == 422
+    assert puts == []
+    assert pool.inserts == []
+
+
+def test_image_with_excessive_dimensions_is_rejected_without_decoding_pixels(api):
+    import struct
+    import zlib
+
+    client, puts, pool = api
+    payload = bytearray(png_bytes())
+    payload[16:24] = struct.pack(">II", 10000, 10000)
+    payload[29:33] = struct.pack(">I", zlib.crc32(payload[12:29]))
+    response = client.post(
+        "/api/v1/photos",
+        data={"kind": "before"},
+        files={"file": ("oversized.png", bytes(payload), "image/png")},
+    )
+    assert response.status_code == 422
+    assert puts == [] and pool.inserts == []

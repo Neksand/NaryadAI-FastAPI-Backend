@@ -202,3 +202,93 @@ def test_user_token_check_catches_database_failure_and_auth_version_mismatch(mon
 
     monkeypatch.setattr(realtime, "get_pool", stale_pool)
     assert asyncio.run(realtime._user_from_token("token")) is None
+
+
+def test_user_me_subscription_receives_canonical_user_events(monkeypatch):
+    pool = Pool()
+    uid = valid_user(pool, monkeypatch)
+
+    async def allowed(*_args):
+        return {"id": "order"}
+
+    monkeypatch.setattr(realtime, "assert_can_read_order", allowed)
+
+    class BroadcastingSocket(FakeWebSocket):
+        async def receive_json(self):
+            if not self.messages:
+                await realtime.broadcast([f"user:{uid}"], "WORK_ORDER_ASSIGNED", {"id": "order"})
+            return await super().receive_json()
+
+    socket = BroadcastingSocket(messages=[{"op": "subscribe", "channels": ["user:me"]}])
+    asyncio.run(realtime._handle(socket))
+    assert any(item["type"] == "WORK_ORDER_ASSIGNED" for item in socket.sent)
+    session_query, session_args = pool.fetchrow_calls[-1]
+    assert "employee_id=$2" in session_query
+    assert session_args[1] == uid
+
+
+def test_master_shift_subscription_cannot_receive_other_area_order(monkeypatch):
+    realtime._connections.clear()
+    master_a, master_b = Socket(), Socket()
+    user_a = {"id": "master-a", "role": "master", "areaIds": ["area-a"]}
+    user_b = {"id": "master-b", "role": "master", "areaIds": ["area-b"]}
+
+    async def order_access(user, order_id):
+        assert order_id == "order-a"
+        if "area-a" not in user["areaIds"]:
+            raise LookupError("Outside assigned site")
+
+    monkeypatch.setattr(realtime, "assert_can_read_order", order_access)
+    realtime.register("master-a", master_a, {"shift:current"}, user=user_a)
+    realtime.register("master-b", master_b, {"shift:current"}, user=user_b)
+    try:
+        count = asyncio.run(
+            realtime.broadcast(["shift:current"], "WORK_ORDER_STARTED", {"id": "order-a"})
+        )
+        assert count == 1
+        assert len(master_a.messages) == 1 and master_b.messages == []
+    finally:
+        realtime.unregister(master_a)
+        realtime.unregister(master_b)
+
+
+def test_master_shift_subscription_scopes_worker_status_to_assigned_areas(monkeypatch):
+    class AreaPool:
+        async def fetchval(self, query, employee_id, areas):
+            assert "employee_areas" in query
+            return employee_id == "worker-a" and "area-a" in areas
+
+    async def pool():
+        return AreaPool()
+
+    monkeypatch.setattr(realtime, "get_pool", pool)
+    a = {"id": "master-a", "role": "master", "areaIds": ["area-a"]}
+    b = {"id": "master-b", "role": "master", "areaIds": ["area-b"]}
+    assert asyncio.run(realtime._can_receive(a, "WORKER_STATUS_CHANGED", {"id": "worker-a"}))
+    assert not asyncio.run(realtime._can_receive(b, "WORKER_STATUS_CHANGED", {"id": "worker-a"}))
+
+
+def test_broadcast_disconnects_expired_or_revoked_sessions_before_delivery(monkeypatch):
+    class CloseableSocket(Socket):
+        async def close(self, code):
+            self.closed = code
+
+    socket = CloseableSocket()
+
+    async def revoked(_token):
+        return None
+
+    monkeypatch.setattr(realtime, "_user_from_token", revoked)
+    realtime.register(
+        "master",
+        socket,
+        {"shift:current"},
+        user={"id": "master", "role": "master", "areaIds": []},
+        token="revoked-token",
+    )
+    assert (
+        asyncio.run(realtime.broadcast(["shift:current"], "WORK_ORDER_UPDATED", {"id": "order"}))
+        == 0
+    )
+    assert socket.messages == [] and socket.closed == 4401
+    assert realtime.channels_for("master", socket) == set()

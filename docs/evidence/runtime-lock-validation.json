@@ -1,0 +1,72 @@
+{
+  "checked_on": "2026-10-14",
+  "runtime_lock": {
+    "status": "PASS",
+    "packages": 45,
+    "audited_source_packages": 49,
+    "excluded_test_only": [
+      "pytest",
+      "pluggy",
+      "iniconfig",
+      "pygments"
+    ],
+    "sha256": "989ced10de8ef09d84acf6d6def77cac537ed9dba4f5cb9b87648409409626ff",
+    "dry_run": "PASS: resolver returned exactly the 45 pinned package versions",
+    "installed_versions": "PASS: all 45 match backend-venv",
+    "platform": "macOS arm64 / Python 3.12",
+    "command": "python -m pip install --dry-run --ignore-installed --only-binary=:all: --report work/runtime-lock-dry-run.json -r requirements.lock"
+  },
+  "compose_yaml": [
+    {
+      "file": "docker-compose.yml",
+      "syntax": "PASS",
+      "service_mapping": "PASS",
+      "services": [
+        "api",
+        "postgres",
+        "redis",
+        "s3"
+      ]
+    },
+    {
+      "file": "compose.web.yaml",
+      "syntax": "PASS",
+      "service_mapping": "PASS",
+      "services": [
+        "web",
+        "worker"
+      ]
+    },
+    {
+      "file": "compose.tunnel.yaml",
+      "syntax": "PASS",
+      "service_mapping": "PASS",
+      "services": [
+        "tunnel"
+      ]
+    },
+    {
+      "file": "compose.production.yaml",
+      "syntax": "PASS",
+      "service_mapping": "PASS",
+      "services": [
+        "api",
+        "postgres",
+        "redis",
+        "web"
+      ]
+    }
+  ],
+  "compose_dependency_references": "PASS: development, combined web+tunnel and standalone production profiles",
+  "production_structure": "PASS: only Caddy exposes host ports; API read-only; runtime lock and HEALTHCHECK present; no Moto",
+  "docker_build": {
+    "status": "BLOCKED",
+    "reason": "Docker binary is unavailable; PyYAML checks do not replace docker compose config or image build"
+  },
+  "limitations": [
+    "Linux container wheel resolution/build is not executed.",
+    "Lock pins versions but has no wheel hashes.",
+    "Container base image and OS package tags remain mutable.",
+    "Compose interpolation and engine semantics require docker compose config on a Docker host."
+  ]
+}

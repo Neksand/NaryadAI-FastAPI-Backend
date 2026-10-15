@@ -1,0 +1,36 @@
+{
+  "status": "PASS",
+  "at": "2026-10-14T17:05:44.136489+00:00",
+  "database": "naryadai_smoke_e52c9ef126",
+  "scope": "New empty PostgreSQL database; existing databases unchanged. Fresh migration twice, seed twice, all three SQL verifiers. API/browser separately verified on local demo DB.",
+  "steps": [
+    {
+      "command": "python -m scripts.migrate",
+      "status": "PASS"
+    },
+    {
+      "command": "python -m scripts.migrate",
+      "status": "PASS"
+    },
+    {
+      "command": "python -m scripts.seed",
+      "status": "PASS"
+    },
+    {
+      "command": "python -m scripts.seed",
+      "status": "PASS"
+    },
+    {
+      "command": "python -m scripts.verify_dataset",
+      "status": "PASS"
+    },
+    {
+      "command": "python -m scripts.verify_analytics",
+      "status": "PASS"
+    },
+    {
+      "command": "python -m scripts.verify_insights",
+      "status": "PASS"
+    }
+  ]
+}

@@ -154,12 +154,19 @@ class _Tx:
 class FakePool:
     """Минимальный дубль asyncpg-пула с acquire()/transaction()."""
 
-    def __init__(self, existing_keys: tuple[str, ...] = ()):
+    def __init__(self, existing_keys: tuple[str, ...] = (), area_ids: tuple[str, ...] = (AREA,)):
         self.existing = set(existing_keys)
+        self.area_ids = set(area_ids)
+        self.area_queries: list[str] = []
         self.acquire_calls = 0
         self.tx_used = False
         self.fetchrow_calls: list[tuple[str, tuple[Any, ...]]] = []
         self.execute_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def fetch(self, query: str, *args: Any) -> list[dict[str, str]]:
+        assert "FROM areas" in query
+        self.area_queries.append(query)
+        return [{"id": area} for area in args[0] if area in self.area_ids]
 
     def acquire(self) -> Any:
         pool = self
@@ -187,6 +194,9 @@ class FakePool:
             if args and args[0] in self._pool.existing:
                 return {"id": str(uuid.uuid4())}
             return None
+
+        async def fetch(self, query: str, *args: Any) -> list[dict[str, str]]:
+            return await self._pool.fetch(query, *args)
 
         async def execute(self, query: str, *args: Any) -> str:
             self._pool.execute_calls.append((query, args))
@@ -280,6 +290,51 @@ def test_http_apply_materials_created(make_client: Any) -> None:
     assert pool.execute_calls[0][0].startswith("INSERT INTO materials")
 
 
+def test_http_missing_area_preview_reports_original_excel_row(make_client: Any) -> None:
+    pool = FakePool()
+    client = make_client(pool)
+    missing = str(uuid.uuid4())
+    data = make_xlsx(
+        EQ_HEADER,
+        [eq_row("valid"), [None] * len(EQ_HEADER), eq_row("bad-area", area_id=missing)],
+    )
+    response = post_file(client, "equipment", data, True)
+    assert response.status_code == 200
+    assert response.json()["errors"] == [
+        {"row": 4, "path": "area_id", "message": "Участок не найден или удалён"}
+    ]
+    assert pool.execute_calls == []
+    assert pool.acquire_calls == 0
+    assert "FOR SHARE" not in pool.area_queries[0]
+
+
+def test_http_missing_area_apply_is_422_before_any_row_is_written(make_client: Any) -> None:
+    pool = FakePool()
+    client = make_client(pool)
+    data = make_xlsx(EQ_HEADER, [eq_row("valid"), eq_row("bad", area_id=str(uuid.uuid4()))])
+    response = post_file(client, "equipment", data, False)
+    assert response.status_code == 422
+    assert response.json()["error"]["details"] == [
+        {"row": 3, "path": "area_id", "message": "Участок не найден или удалён"}
+    ]
+    assert pool.tx_used
+    assert "FOR SHARE" in pool.area_queries[0]
+    assert pool.execute_calls == []
+
+
+def test_http_area_is_revalidated_after_preview(make_client: Any) -> None:
+    pool = FakePool()
+    client = make_client(pool)
+    data = make_xlsx(EQ_HEADER, [eq_row("INV-1", area_id=AREA.upper())])
+    preview = post_file(client, "equipment", data, True)
+    assert preview.json()["errors"] == []
+    pool.area_ids.clear()
+    response = post_file(client, "equipment", data, False)
+    assert response.status_code == 422
+    assert response.json()["error"]["details"][0]["path"] == "area_id"
+    assert pool.execute_calls == []
+
+
 def test_http_forbidden_for_non_admin_and_404_for_unknown(make_client: Any) -> None:
     pool = FakePool()
     worker = make_client(pool, role="worker")
@@ -292,10 +347,117 @@ def test_http_forbidden_for_non_admin_and_404_for_unknown(make_client: Any) -> N
     assert bad.status_code == 422
 
 
-@pytest.mark.skip(
-    reason="Нет живого Postgres-пула в тестовом окружении: "
-    "атомарность на реальной БД (failed-apply не меняет count) "
-    "проверяется только фейковым пулом выше"
-)
-def test_integration_atomicity_on_live_db() -> None:
-    raise AssertionError("unreachable: skipped")
+def test_integration_atomicity_on_live_db(monkeypatch) -> None:
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    import asyncpg
+    from fastapi import UploadFile
+
+    from app.config import settings
+    from app.routers import import_excel
+
+    async def check():
+        assert settings.NODE_ENV != "production", "Use an isolated test database"
+        conn = await asyncpg.connect(settings.DATABASE_URL)
+        try:
+            await conn.execute(
+                "CREATE TEMP TABLE materials(id uuid DEFAULT gen_random_uuid(), "
+                "name text UNIQUE CHECK(name != 'rollback-trigger'), unit text)"
+            )
+
+            class Pool:
+                @asynccontextmanager
+                async def acquire(self):
+                    yield conn
+
+            async def get_pool():
+                return Pool()
+
+            monkeypatch.setattr(import_excel, "get_pool", get_pool)
+            data = make_xlsx(MAT_HEADER, [["first-valid-row", "шт"], ["rollback-trigger", "шт"]])
+            with pytest.raises(asyncpg.CheckViolationError):
+                await import_excel.import_dict(
+                    "materials",
+                    UploadFile(file=io.BytesIO(data), filename="test.xlsx"),
+                    False,
+                    {"role": "admin"},
+                )
+            assert await conn.fetchval("SELECT count(*) FROM materials") == 0
+        finally:
+            await conn.close()
+
+    asyncio.run(check())
+
+
+def test_live_equipment_import_references_are_validated_before_atomic_apply(monkeypatch) -> None:
+    import asyncio
+    from contextlib import asynccontextmanager
+
+    import asyncpg
+    from fastapi import UploadFile
+
+    from app.config import settings
+    from app.errors import AppError
+
+    async def check():
+        assert settings.NODE_ENV != "production", "Use an isolated test database"
+        conn = await asyncpg.connect(settings.DATABASE_URL)
+        try:
+            await conn.execute(
+                "CREATE TEMP TABLE areas(id uuid PRIMARY KEY, deleted_at timestamptz); "
+                "CREATE TEMP TABLE equipment(id uuid DEFAULT gen_random_uuid(), name text, "
+                "inventory_no text UNIQUE, area_id uuid REFERENCES pg_temp.areas(id), type text, "
+                "criticality text, updated_at timestamptz, deleted_at timestamptz)"
+            )
+            active, deleted, missing = str(uuid.uuid4()), str(uuid.uuid4()), str(uuid.uuid4())
+            await conn.execute(
+                "INSERT INTO areas VALUES ($1::uuid,NULL),($2::uuid,now())", active, deleted
+            )
+
+            class Pool:
+                @asynccontextmanager
+                async def acquire(self):
+                    yield conn
+
+                async def fetch(self, query, *args):
+                    return await conn.fetch(query, *args)
+
+            async def get_pool():
+                return Pool()
+
+            monkeypatch.setattr(import_excel, "get_pool", get_pool)
+            data = make_xlsx(
+                EQ_HEADER,
+                [
+                    eq_row("valid", area_id=active),
+                    eq_row("deleted", area_id=deleted),
+                    eq_row("missing", area_id=missing),
+                ],
+            )
+
+            async def execute(content, dry_run):
+                return await import_excel.import_dict(
+                    "equipment",
+                    UploadFile(file=io.BytesIO(content), filename="test.xlsx"),
+                    dry_run,
+                    {"role": "admin"},
+                )
+
+            preview = await execute(data, True)
+            assert [(item["row"], item["path"]) for item in preview["errors"]] == [
+                (3, "area_id"),
+                (4, "area_id"),
+            ]
+            with pytest.raises(AppError) as caught:
+                await execute(data, False)
+            assert caught.value.status_code == 422
+            assert caught.value.details == preview["errors"]
+            assert await conn.fetchval("SELECT count(*) FROM equipment") == 0
+            valid = make_xlsx(EQ_HEADER, [eq_row("valid", area_id=active)])
+            assert await execute(valid, False) == {"created": 1, "updated": 0}
+            assert await conn.fetchval("SELECT count(*) FROM equipment") == 1
+        finally:
+            await conn.close()
+
+    asyncio.run(check())

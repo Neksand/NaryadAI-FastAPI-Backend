@@ -259,15 +259,17 @@ def test_allowed_actions_master_and_forbidden():
 
 
 def test_photo_verify_accepts_and_rejects():
+    import io
+
+    from PIL import Image
+
     from app.errors import AppError
     from app.routers.photos import _verify
 
-    jpeg = bytes([0xFF, 0xD8, 0xFF]) + b"\x00" * 100
-    _verify(jpeg, "image/jpeg")
-    png = bytes([137, 80, 78, 71, 13, 10, 26, 10]) + b"\x00" * 100
-    _verify(png, "image/png")
-    webp = b"RIFF1234WEBP" + b"\x00" * 100
-    _verify(webp, "image/webp")
+    for format_name, mime in (("JPEG", "image/jpeg"), ("PNG", "image/png"), ("WEBP", "image/webp")):
+        output = io.BytesIO()
+        Image.new("RGB", (12, 12), (100, 20, 30)).save(output, format=format_name)
+        _verify(output.getvalue(), mime)
     with pytest.raises(AppError):
         _verify(b"hello", "image/gif")
     with pytest.raises(AppError):
@@ -385,3 +387,26 @@ def test_idempotency_key_header_passthrough():
 
     assert idempotency_key_from_header("k1") == "k1"
     assert idempotency_key_from_header(None) is None
+
+
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "x" * 40,
+        "replace-with-a-secure-random-token-of-32-characters",
+        "change-me-for-production-please-123456",
+    ],
+)
+def test_production_rejects_long_but_placeholder_secrets(monkeypatch, secret):
+    import app.config as cfg
+
+    orig = cfg.Settings
+    monkeypatch.setattr(
+        cfg,
+        "Settings",
+        lambda *a, **k: _bad_settings(
+            orig, NODE_ENV="production", SEED_ADMIN_PIN="958372", ACCESS_TOKEN_SECRET=secret
+        ),
+    )
+    with pytest.raises(RuntimeError, match="non-placeholder ACCESS_TOKEN_SECRET"):
+        cfg.load_settings()

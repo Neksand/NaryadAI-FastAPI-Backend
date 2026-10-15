@@ -1,0 +1,46 @@
+[
+  {
+    "path": "/api/v1/analytics/dashboard?from=2026-07-01&to=2026-11-01",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/work-orders?from=2026-07-01",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/ratings?from=2026-07-01",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/quality?from=2026-07-01",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/faults?from=2026-07-01",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/insights?status=new",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/patterns",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/areas",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/equipment/ranking",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/materials",
+    "status": 200
+  },
+  {
+    "path": "/api/v1/analytics/downtime",
+    "status": 200
+  }
+]

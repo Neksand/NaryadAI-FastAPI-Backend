@@ -1,0 +1,7 @@
+{
+  "status": "PASS",
+  "scope": "After final tests, local API switched to untouched fresh seed database for user demo; health, login, me, orders, dashboard and web root return200.",
+  "frontend": "http://127.0.0.1:5173",
+  "api": "http://127.0.0.1:8080",
+  "initial_orders": 603
+}

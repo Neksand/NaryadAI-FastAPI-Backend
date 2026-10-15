@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "database": "PostgreSQL; temporary tables rolled back",
+  "checks": [
+    "ISO date filters bind without asyncpg type error",
+    "Pending work is not late",
+    "Excused rejection is not penalized",
+    "Master sees only assigned areas"
+  ],
+  "rating": 77.1,
+  "on_time": 1.0,
+  "unjustified_rejection_share": 0.25
+}

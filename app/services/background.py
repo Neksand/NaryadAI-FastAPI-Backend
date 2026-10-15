@@ -67,8 +67,10 @@ async def _notify_for_event(
         recipients = [r for r in recipients]
     elif event == "order.transition":
         action = payload.get("action", "")
+        if action == "close" and payload.get("to") == "rework":
+            action = "return_to_rework"
         ntype, ws_type = ACTION_NOTIFY.get(action), ACTION_WS.get(action, "WORK_ORDER_UPDATED")
-        if action in ("accept", "reject", "start", "pause", "complete") and order:
+        if action in ("accept", "reject", "start", "pause", "resume", "complete") and order:
             recipients = [str(order["master_id"])]
         elif action in ("close", "return_to_rework") and order:
             recipients = [str(order["master_id"])]
@@ -94,6 +96,37 @@ async def _notify_for_event(
         ntype, ws_type = "WORK_ORDER_ASSIGNED", "WORK_ORDER_ASSIGNED"
     elif event == "employee.status_changed":
         ws_type = "WORKER_STATUS_CHANGED"
+
+    if order and (
+        event
+        in (
+            "order.ai_review_ready",
+            "order.overdue",
+            "order.escalated",
+            "order.overdue_warning",
+            "order.deadline_30min",
+            "order.long_overdue",
+            "order.not_accepted",
+        )
+        or (
+            event == "order.transition"
+            and payload.get("action") in ("close", "return_to_rework", "reassign")
+        )
+    ):
+        # A crew assignment has no assignee_id. Notify its active members too,
+        # and on reassignment avoid treating the former worker as a new assignee.
+        recipients = [] if payload.get("action") == "reassign" else [str(order["master_id"])]
+        if order["assignee_id"]:
+            recipients.append(str(order["assignee_id"]))
+        elif order["crew_id"]:
+            recipients.extend(
+                str(member["id"])
+                for member in await conn.fetch(
+                    "SELECT id FROM employees WHERE crew_id=$1::uuid AND role='worker' AND enabled=true AND deleted_at IS NULL",
+                    str(order["crew_id"]),
+                )
+            )
+        channels = list(dict.fromkeys([*channels, *(f"user:{uid}" for uid in recipients)]))
 
     rows = []
     if ntype and recipients and oid:
