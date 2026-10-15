@@ -76,7 +76,7 @@ MASTER_TRANSITIONS = {
 
 class CreateWO(BaseModel):
     kind: Literal["planned", "unplanned"]
-    description: str = Field(min_length=3, max_length=4000)
+    description: str = Field(min_length=1, max_length=4000)
     description_source: Literal["text", "voice"] = "text"
     equipment_id: uuid.UUID
     assignee_id: uuid.UUID | None = None
