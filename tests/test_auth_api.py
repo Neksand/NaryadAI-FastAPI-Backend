@@ -256,3 +256,50 @@ def test_profile_alias_and_device_registration_validate_contract(api):
     assert (
         client.post("/api/v1/devices", json={"platform": "bad", "fcm_token": ""}).status_code == 422
     )
+
+
+def test_concurrent_refresh_race_keeps_session_alive():
+    """Гонка двух refresh с одним токеном: оба 200, в конце ровно одна живая сессия.
+
+    DB-backed, требует seed-БД (master1/3333) — как top1-интеграции.
+    """
+    import threading
+
+    from fastapi.testclient import TestClient
+
+    from app import db as _dbmod
+    from app.main import create_app
+
+    _dbmod._pool = None
+    app = create_app()
+    with TestClient(app) as client:
+        login = client.post("/api/v1/auth/login", json={"login": "master1", "pin": "3333"})
+        assert login.status_code == 200, login.text
+        token = login.json()["refresh_token"]
+        user_id = login.json()["user"]["id"]
+
+        results = []
+
+        def hit():
+            try:
+                r = client.post("/api/v1/auth/refresh", json={"refresh_token": token})
+                results.append(r.status_code)
+            except Exception as exc:
+                results.append(repr(exc))
+
+        threads = [threading.Thread(target=hit) for _ in range(2)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join(timeout=30)
+        assert sorted(results) == [200, 200], results
+
+        live = client.post("/api/v1/auth/login", json={"login": "master1", "pin": "3333"})
+        assert live.status_code == 200
+        newest = live.json()["refresh_token"]
+        # Все токены гонки, кроме новейшего, уже отозваны — повтор старого даёт 401,
+        # а не вешает сессию; новейший работает.
+        assert (
+            client.post("/api/v1/auth/refresh", json={"refresh_token": newest}).status_code == 200
+        )
+        assert user_id

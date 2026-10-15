@@ -130,6 +130,9 @@ async def login(body: LoginIn) -> dict[str, Any]:
     return await _issue_session(await _load_user(str(row["id"])))
 
 
+REFRESH_REUSE_GRACE_SECONDS = 60
+
+
 @router.post("/auth/refresh")
 async def refresh(body: RefreshIn) -> dict[str, Any]:
     pool = await get_pool()
@@ -140,7 +143,24 @@ async def refresh(body: RefreshIn) -> dict[str, Any]:
             hash_refresh_token(body.refresh_token),
         )
         if not cur:
-            raise unauthorized("Refresh-сессия истекла или отозвана")
+            # Grace window: параллельный refresh уже провернул ротацию и наш
+            # токен отозван секунды назад. Ротируем от новейшей живой сессии
+            # того же сотрудника — оба гонщика получают валидные токены
+            # вместо вылета на логин.
+            cur = await conn.fetchrow(
+                """SELECT live.id, live.employee_id FROM refresh_sessions dead
+                   JOIN refresh_sessions live ON live.employee_id = dead.employee_id
+                     AND live.revoked_at IS NULL AND live.expires_at > now()
+                     AND live.created_at >= dead.revoked_at - interval '5 seconds'
+                   WHERE dead.token_hash = $1 AND dead.revoked_at IS NOT NULL
+                     AND dead.revoked_at > now() - ($2::text || ' seconds')::interval
+                     AND dead.expires_at > now()
+                   ORDER BY live.created_at DESC LIMIT 1 FOR UPDATE OF live""",
+                hash_refresh_token(body.refresh_token),
+                str(REFRESH_REUSE_GRACE_SECONDS),
+            )
+            if not cur:
+                raise unauthorized("Refresh-сессия истекла или отозвана")
         emp = await conn.fetchrow(
             """SELECT e.id, e.role, e.crew_id, e.full_name, e.auth_version,
                       COALESCE(array_agg(ea.area_id) FILTER (WHERE ea.area_id IS NOT NULL), '{}') AS area_ids

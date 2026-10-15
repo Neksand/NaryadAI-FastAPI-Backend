@@ -110,11 +110,13 @@ def test_endpoint_returns_sorted_forecast_matching_pure_score(make_client):
         assert set(item) == {
             "equipment_id",
             "equipment_name",
+            "risk_index",
             "probability",
             "recent",
             "growth",
             "score_kind",
         }
+        assert item["probability"] == item["risk_index"]
     top = items[0]
     assert top["recent"] == 8
     assert top == {
@@ -122,9 +124,10 @@ def test_endpoint_returns_sorted_forecast_matching_pure_score(make_client):
         "equipment_name": "Конвейер К-3",
         "recent": 8,
         "score_kind": "heuristic_risk_index",
+        "risk_index": score_forecast(8, 1, "A")["probability"],
         **score_forecast(8, 1, "A"),
     }
-    probs = [i["probability"] for i in items]
+    probs = [i["risk_index"] for i in items]
     assert probs == sorted(probs, reverse=True)
 
 

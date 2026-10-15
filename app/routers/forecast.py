@@ -10,7 +10,7 @@ The legacy probability field is NOT a calibrated failure probability.
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from app.db import get_pool
 from app.deps import get_current_user, require_role
@@ -58,12 +58,21 @@ def score_forecast(recent: int, prev: int, crit: str | int | float) -> dict[str,
 class ForecastItem(BaseModel):
     equipment_id: str
     equipment_name: str
+    risk_index: float = Field(
+        description="Heuristic risk index 0..1, not a calibrated failure probability"
+    )
     probability: float = Field(
-        description="Legacy field: heuristic risk index 0..1, not a calibrated failure probability"
+        default=0.0,
+        description="Legacy alias of risk_index, kept for contract compatibility",
     )
     score_kind: Literal["heuristic_risk_index"] = "heuristic_risk_index"
     recent: int
     growth: float
+
+    @model_validator(mode="after")
+    def _sync_legacy_alias(self) -> "ForecastItem":
+        self.probability = self.risk_index
+        return self
 
 
 @router.get("/analytics/failure-forecast", summary="Heuristic maintenance risk per equipment")
@@ -95,10 +104,10 @@ async def failure_forecast(
             ForecastItem(
                 equipment_id=str(d["id"]),
                 equipment_name=str(d["name"]),
-                probability=scored["probability"],
+                risk_index=scored["probability"],
                 recent=recent,
                 growth=scored["growth"],
             )
         )
-    items.sort(key=lambda x: (-x.probability, -x.recent, x.equipment_name))
+    items.sort(key=lambda x: (-x.risk_index, -x.recent, x.equipment_name))
     return items
