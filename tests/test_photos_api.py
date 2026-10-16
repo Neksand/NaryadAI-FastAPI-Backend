@@ -56,12 +56,26 @@ class Pool:
         self.fetchval_calls = []
         self.execute_calls = []
 
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    def transaction(self):
+        return _NoopTransaction()
+
     async def fetch(self, query, *args):
         self.fetch_calls.append((query, args))
         return self.photos
 
     async def fetchrow(self, query, *args):
         self.fetchrow_calls.append((query, args))
+        if "FOR UPDATE" in query:
+            return self.order
         if "FROM work_orders" in query:
             return self.order
         if "sha256=$2" in query:
@@ -80,6 +94,14 @@ class Pool:
 
     async def execute(self, query, *args):
         self.execute_calls.append((query, args))
+
+
+class _NoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
 
 
 class S3:
@@ -142,7 +164,7 @@ def test_image_helpers_verify_signatures_compute_hashes_and_read_exif():
 
 
 def test_standalone_upload_enforces_master_before_kind_and_file_size(api, monkeypatch):
-    create, _, _ = api
+    create, puts, _ = api
     payload = image_bytes()
     denied = create(Pool(), role="manager")[0].post(
         "/api/v1/photos",
@@ -163,6 +185,7 @@ def test_standalone_upload_enforces_master_before_kind_and_file_size(api, monkey
         files={"file": ("x.png", payload, "image/png")},
     )
     assert too_large.status_code == 413
+    assert puts == []
 
 
 def test_standalone_upload_returns_existing_duplicate_without_reupload(api):

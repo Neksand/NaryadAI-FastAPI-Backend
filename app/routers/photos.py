@@ -186,6 +186,38 @@ def _parse_client_taken_at(value: str | None) -> datetime | None:
         ) from e
 
 
+async def _find_duplicate(
+    pool: Any,
+    user_id: str,
+    digest: str,
+    kind: str,
+    order_id: str | None,
+) -> Any | None:
+    """Existing row for the same (author, file, kind, order-or-pending), if any."""
+    if order_id is None:
+        return await pool.fetchrow(
+            "SELECT id, object_key FROM photos WHERE author_id=$1::uuid AND sha256=$2 AND kind=$3 AND work_order_id IS NULL LIMIT 1",
+            user_id,
+            digest,
+            kind,
+        )
+    return await pool.fetchrow(
+        "SELECT id, object_key FROM photos WHERE author_id=$1::uuid AND sha256=$2 AND kind=$3 AND work_order_id=$4::uuid LIMIT 1",
+        user_id,
+        digest,
+        kind,
+        order_id,
+    )
+
+
+def _delete_s3_key(key: str) -> None:
+    from app.config import settings as s
+    from app.storage import get_s3
+
+    with contextlib.suppress(Exception):
+        get_s3().delete_object(Bucket=s.S3_BUCKET, Key=key)
+
+
 async def _create_photo(
     user: dict[str, Any],
     data: bytes,
@@ -221,12 +253,7 @@ async def _create_photo(
         data = _strip_jpeg_exif(data)
     digest = hashlib.sha256(data).hexdigest()
     phash = _dhash(data)
-    dup = await pool.fetchrow(
-        "SELECT id, object_key FROM photos WHERE author_id=$1::uuid AND sha256=$2 AND kind=$3 AND work_order_id IS NULL LIMIT 1",
-        user["id"],
-        digest,
-        kind,
-    )
+    dup = await _find_duplicate(pool, user["id"], digest, kind, order_id)
     if dup:
         return {
             "id": str(dup["id"]),
@@ -244,35 +271,110 @@ async def _create_photo(
         _near_dup = bool(near and near["phash"] and hamming(phash, near["phash"]) <= 6)
     else:
         _near_dup = False
-    if order_id:
-        cnt = await pool.fetchval(
-            "SELECT count(*) FROM photos WHERE work_order_id=$1::uuid AND kind=$2", order_id, kind
-        )
-        if (kind == "before" and int(cnt) >= 5) or (kind == "after" and int(cnt) >= 10):
-            raise validation_error([{"path": "file", "message": "Превышен лимит фото"}])
     key = f"work-orders/{order_id or 'pending'}/{uuid.uuid4()}"
-    put_bytes(key, data, mime)
+    upload_attempted = False
+    row_inserted = False
+    duplicate_after_lock = None
     try:
-        row = await pool.fetchrow(
-            "INSERT INTO photos(work_order_id, kind, object_key, content_type, size_bytes, sha256, author_id, phash, exif_taken_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8,$9) RETURNING id",
-            order_id,
-            kind,
-            key,
-            mime,
-            len(data),
-            digest,
-            user["id"],
-            phash,
-            taken_at,
-        )
+        if order_id is None:
+            # Pending photos rely on the unique dedup index for concurrent retries.
+            upload_attempted = True
+            put_bytes(key, data, mime)
+            async with pool.acquire() as conn, conn.transaction():
+                row = await conn.fetchrow(
+                    "INSERT INTO photos(work_order_id, kind, object_key, content_type, size_bytes, sha256, author_id, phash, exif_taken_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8,$9) ON CONFLICT DO NOTHING RETURNING id",
+                    None,
+                    kind,
+                    key,
+                    mime,
+                    len(data),
+                    digest,
+                    user["id"],
+                    phash,
+                    taken_at,
+                )
+                # Set this before transaction exit: if commit acknowledgement is
+                # lost, deleting the object could break a row that actually committed.
+                row_inserted = row is not None
+        else:
+            # Serialize the count check and insert per order. Hold the row lock
+            # through the S3 write so different concurrent files cannot all pass
+            # the same remaining-slot check.
+            async with pool.acquire() as conn, conn.transaction():
+                locked = await conn.fetchrow(
+                    "SELECT id FROM work_orders WHERE id=$1::uuid FOR UPDATE", order_id
+                )
+                if not locked:
+                    raise not_found("Наряд не найден")
+                duplicate_after_lock = await conn.fetchrow(
+                    "SELECT id, object_key FROM photos WHERE author_id=$1::uuid AND sha256=$2 AND kind=$3 AND work_order_id=$4::uuid LIMIT 1",
+                    user["id"],
+                    digest,
+                    kind,
+                    order_id,
+                )
+                if duplicate_after_lock is None:
+                    cnt = await conn.fetchval(
+                        "SELECT count(*) FROM photos WHERE work_order_id=$1::uuid AND kind=$2",
+                        order_id,
+                        kind,
+                    )
+                    if (kind == "before" and int(cnt) >= 5) or (kind == "after" and int(cnt) >= 10):
+                        raise validation_error([{"path": "file", "message": "Превышен лимит фото"}])
+                    upload_attempted = True
+                    put_bytes(key, data, mime)
+                    row = await conn.fetchrow(
+                        "INSERT INTO photos(work_order_id, kind, object_key, content_type, size_bytes, sha256, author_id, phash, exif_taken_at) VALUES ($1::uuid,$2,$3,$4,$5,$6,$7::uuid,$8,$9) ON CONFLICT DO NOTHING RETURNING id",
+                        order_id,
+                        kind,
+                        key,
+                        mime,
+                        len(data),
+                        digest,
+                        user["id"],
+                        phash,
+                        taken_at,
+                    )
+                    row_inserted = row is not None
     except Exception:
-        from app.config import settings as s
-        from app.storage import get_s3
-
-        with contextlib.suppress(Exception):
-            get_s3().delete_object(Bucket=s.S3_BUCKET, Key=key)
+        # A failed PUT may have reached S3 despite a lost response. Compensate
+        # when the database insert is known not to have succeeded. If commit
+        # fails after INSERT returned, retain the object because commit outcome
+        # is ambiguous and deleting it could leave a live DB row without a file.
+        if upload_attempted and not row_inserted:
+            _delete_s3_key(key)
         raise
+    if duplicate_after_lock is not None:
+        return {
+            "id": str(duplicate_after_lock["id"]),
+            "url": signed_url(duplicate_after_lock["object_key"], 300),
+            "expires_in": 300,
+            "replayed": True,
+        }
+    if row is None:
+        # Lost a concurrent dedup race (unique index on
+        # (author, file, kind, order-or-pending) swallowed the insert):
+        # drop our orphaned S3 object and replay the winner.
+        if upload_attempted:
+            _delete_s3_key(key)
+        winner = await _find_duplicate(pool, user["id"], digest, kind, order_id)
+        if winner:
+            return {
+                "id": str(winner["id"]),
+                "url": signed_url(winner["object_key"], 300),
+                "expires_in": 300,
+                "replayed": True,
+            }
+        raise AppError(409, "photo_conflict", "Фото уже загружается, повторите запрос")
     return {"id": str(row["id"]), "url": signed_url(key, 300), "expires_in": 300, "replayed": False}
+
+
+async def _read_upload_limited(file: UploadFile) -> bytes:
+    """Read at most MAX_UPLOAD_BYTES + 1 bytes before rejecting oversized input."""
+    data = await file.read(settings.MAX_UPLOAD_BYTES + 1)
+    if len(data) > settings.MAX_UPLOAD_BYTES:
+        raise AppError(413, "file_too_large", "Размер файла превышает допустимый")
+    return data
 
 
 @router.post("/photos")
@@ -283,7 +385,7 @@ async def upload_standalone(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     return await _create_photo(
-        user, await file.read(), file.content_type or "", kind, None, taken_at
+        user, await _read_upload_limited(file), file.content_type or "", kind, None, taken_at
     )
 
 
@@ -296,7 +398,12 @@ async def upload_to_order(
     user: dict[str, Any] = Depends(get_current_user),
 ) -> dict[str, Any]:
     return await _create_photo(
-        user, await file.read(), file.content_type or "", kind, str(order_id), taken_at
+        user,
+        await _read_upload_limited(file),
+        file.content_type or "",
+        kind,
+        str(order_id),
+        taken_at,
     )
 
 

@@ -42,6 +42,18 @@ class _Pool:
     def __init__(self):
         self.inserts = []
 
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    def transaction(self):
+        return _NoopTransaction()
+
     async def fetchrow(self, query, *args):
         if "INSERT INTO photos" in query:
             self.inserts.append(args)
@@ -53,6 +65,14 @@ class _Pool:
 
     async def execute(self, query, *args):
         pass
+
+
+class _NoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
 
 
 @pytest.fixture

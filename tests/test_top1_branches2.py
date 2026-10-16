@@ -742,7 +742,21 @@ class _PhotoPool:
         self.insert_id = insert_id or str(uuid.uuid4())
         self.fail_insert = fail_insert
 
+    def acquire(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
+        return None
+
+    def transaction(self):
+        return _PhotoNoopTransaction()
+
     async def fetchrow(self, query, *args):
+        if "FOR UPDATE" in query:
+            return {"id": args[0]}
         if "AND sha256" in query:
             return self.dup
         if "phash IS NOT NULL" in query:
@@ -757,6 +771,14 @@ class _PhotoPool:
         return self.count
 
     async def execute(self, query, *args):
+        return None
+
+
+class _PhotoNoopTransaction:
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_exc):
         return None
 
 
@@ -899,8 +921,8 @@ def test_create_photo_insert_failure_cleans_s3(monkeypatch):
 class _Upload:
     content_type = "image/jpeg"
 
-    async def read(self):
-        return _JPEG
+    async def read(self, size=-1):
+        return _JPEG if size < 0 else _JPEG[:size]
 
 
 def test_upload_wrappers_delegate(monkeypatch):
