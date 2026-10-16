@@ -13,7 +13,7 @@ ACTION_NOTIFY = {
     "reject": "WORK_ORDER_REJECTED",
     "start": "WORK_ORDER_STARTED",
     "pause": "WORK_ORDER_PAUSED",
-    "resume": "WORK_ORDER_STARTED",
+    "resume": "WORK_ORDER_RESUMED",
     "complete": "WORK_ORDER_COMPLETED",
     "close": "WORK_ORDER_CLOSED",
     "return_to_rework": "WORK_ORDER_REWORK",
@@ -59,6 +59,22 @@ async def _notify_for_event(
             order = None
     number = payload.get("number") or (order["number"] if order else "?")
     data = {**payload, "number": number}
+    if oid and payload.get("action") in ("reject", "pause", "cancel"):
+        # Причина лежит в журнале, а не в payload: подтягиваем ru/kk названия,
+        # иначе в тексте вечно стоит прочерк.
+        try:
+            reason_row = await conn.fetchrow(
+                """SELECT r.name, r.name_kk FROM work_order_events e
+                   JOIN reasons r ON r.kind || ':' || r.code = e.action || ':' || e.reason_code
+                   WHERE e.work_order_id=$1::uuid AND e.reason_code IS NOT NULL
+                   ORDER BY e.at DESC LIMIT 1""",
+                str(oid),
+            )
+        except Exception:
+            reason_row = None
+        if reason_row:
+            data["reason_ru"] = reason_row["name"]
+            data["reason_kk"] = reason_row["name_kk"]
     recipients = [c[5:] for c in channels if c.startswith("user:")]
 
     ntype, ws_type = None, event.upper().replace(".", "_")

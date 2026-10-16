@@ -15,6 +15,31 @@ def _t(ru: str, kk: str, lang: str) -> str:
     return kk if lang == "kk" else ru
 
 
+VERDICT_NAMES = {
+    "accepted": ("Принято", "Қабылданды"),
+    "accepted_with_remarks": ("Принято с замечаниями", "Ескертулермен қабылданды"),
+    "needs_rework": ("На доработку", "Пысықтауға"),
+    "needs_master_review": ("Требуется проверка мастером", "Шебер тексеруі қажет"),
+}
+
+
+def verdict_name(verdict: Any, lang: str) -> str:
+    names = VERDICT_NAMES.get(str(verdict or "")) if verdict else None
+    if not names:
+        return "—"
+    return names[1] if lang == "kk" else names[0]
+
+
+def reason_text(d: dict, lang: str) -> str:
+    """Название причины на языке получателя: resolved ru/kk → legacy → прочерк."""
+    if lang == "kk":
+        value = d.get("reason_kk") or d.get("reason")
+    else:
+        value = d.get("reason_ru") or d.get("reason")
+    text = str(value or "").strip()
+    return text or "—"
+
+
 TEMPLATES = {
     "WORK_ORDER_ASSIGNED": lambda d, lang: (
         _t("Новый наряд", "Жаңа наряд", lang),
@@ -33,8 +58,8 @@ TEMPLATES = {
     "WORK_ORDER_REJECTED": lambda d, lang: (
         _t("Наряд отклонён", "Наряд қабылданбады", lang),
         _t(
-            f"Наряд №{d['number']} отклонён: {d.get('reason') or '—'}.",
-            f"№{d['number']} наряд қабылданбады: {d.get('reason') or '—'}.",
+            f"Наряд №{d['number']} отклонён: {reason_text(d, lang)}.",
+            f"№{d['number']} наряд қабылданбады: {reason_text(d, lang)}.",
             lang,
         ),
     ),
@@ -45,8 +70,8 @@ TEMPLATES = {
     "WORK_ORDER_PAUSED": lambda d, lang: (
         _t("Работа приостановлена", "Жұмыс тоқтатылды", lang),
         _t(
-            f"Наряд №{d['number']} на паузе: {d.get('reason') or '—'}.",
-            f"№{d['number']} наряд кідіртілді: {d.get('reason') or '—'}.",
+            f"Наряд №{d['number']} на паузе: {reason_text(d, lang)}.",
+            f"№{d['number']} наряд кідіртілді: {reason_text(d, lang)}.",
             lang,
         ),
     ),
@@ -69,16 +94,16 @@ TEMPLATES = {
     "WORK_ORDER_REWORK": lambda d, lang: (
         _t("Доработайте наряд", "Нарядты пысықтаңыз", lang),
         _t(
-            f"Наряд №{d['number']} возвращён на доработку: {d.get('reason') or '—'}.",
-            f"№{d['number']} наряд пысықтауға қайтарылды: {d.get('reason') or '—'}.",
+            f"Наряд №{d['number']} возвращён на доработку: {reason_text(d, lang)}.",
+            f"№{d['number']} наряд пысықтауға қайтарылды: {reason_text(d, lang)}.",
             lang,
         ),
     ),
     "AI_INSPECTION_READY": lambda d, lang: (
         _t("Проверка ИИ готова", "ЖИ тексеруі дайын", lang),
         _t(
-            f"Наряд №{d['number']}: вердикт — {d.get('verdict', '—')}.",
-            f"№{d['number']} наряд: қорытынды — {d.get('verdict', '—')}.",
+            f"Наряд №{d['number']}: вердикт — {verdict_name(d.get('verdict'), lang)}.",
+            f"№{d['number']} наряд: қорытынды — {verdict_name(d.get('verdict'), lang)}.",
             lang,
         ),
     ),
@@ -121,6 +146,34 @@ TEMPLATES = {
             f"№{d.get('number', '?')} наряд {d.get('minutes_waiting', '—')} мин ішінде қабылданбады. Бос орындаушы: {d.get('candidate_name') or '—'}.",
             lang,
         ),
+    ),
+    "WORK_ORDER_CREATED": lambda d, lang: (
+        _t("Наряд создан", "Наряд жасалды", lang),
+        _t(
+            f"Создан наряд №{d.get('number', '?')}.",
+            f"№{d.get('number', '?')} наряд жасалды.",
+            lang,
+        ),
+    ),
+    "WORK_ORDER_RESUMED": lambda d, lang: (
+        _t("Работа продолжена", "Жұмыс жалғасты", lang),
+        _t(
+            f"Наряд №{d['number']} снова в работе.",
+            f"№{d['number']} наряд қайта орындалуда.",
+            lang,
+        ),
+    ),
+    "WORK_ORDER_UPDATED": lambda d, lang: (
+        _t("Наряд обновлён", "Наряд жаңартылды", lang),
+        _t(
+            f"Наряд №{d.get('number', '?')} обновлён.",
+            f"№{d.get('number', '?')} наряд жаңартылды.",
+            lang,
+        ),
+    ),
+    "WORKER_STATUS_CHANGED": lambda d, lang: (
+        _t("Статус исполнителя", "Орындаушы мәртебесі", lang),
+        _t("Статус исполнителя изменился.", "Орындаушы мәртебесі өзгерді.", lang),
     ),
 }
 
